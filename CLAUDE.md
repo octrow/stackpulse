@@ -65,10 +65,6 @@ Prefer reusing script-level functions and keep behavior parity with existing ent
 
 The library (`linkedin_scraper`) provides two working pieces and one broken piece:
 
-## Architecture
-
-The library (`linkedin_scraper`) provides two working pieces and one broken piece:
-
 - **`BrowserManager`** — Playwright browser wrapper with session save/load. Used as an async context manager.
 - **`JobSearchScraper`** — searches LinkedIn and returns a list of job URLs. Works correctly.
 - **`JobScraper`** (library) — **broken**: only waits for `domcontentloaded`, so it reads an empty DOM before React renders. All fields return `null`. Do not use it.
@@ -115,7 +111,7 @@ config.py (queries + timeouts + paths + LLM settings)
 
 **LLM → taxonomy pipeline**: `--llm` extracts skills via LLM and caches results in `llm_results`. After each run, `promote_llm_to_candidates()` automatically queues terms seen in ≥ 2 jobs that are absent from taxonomy/alias coverage. `--promote` moves pending candidates into `taxonomy`, making them available in all future regex-based runs.
 
-**Coverage gap vs queue status**: `--llm` may report many uncovered terms while `--candidates` shows few or zero pending rows. This is expected: uncovered-term counts are broad, while queue rows are filtered by threshold and candidate status (`pending`/`approved`/`rejected`).
+**Coverage gap vs queue status**: `--llm` reports two metrics: raw uncovered terms and actionable uncovered terms. Actionable terms require `jobs_count >= threshold`, exclusion from `SKIP_TERMS`, and absence from existing `taxonomy_candidates`. `--candidates` shows queue state only (`pending`/`approved`/`rejected`), so it will diverge from raw uncovered counts. Uncovered terms are printed as unescaped display text.
 
 **LLM 429 / rate-limit handling**: `extract_skills_llm()` uses `_call_llm_with_retry()` and `_extract_skills_with_models()` to keep retry/fallback logic isolated. It parses suggested wait from the error message (supports `"try again in ..."` and `"reset after ..."`). If wait ≤ `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` (default 30s), it sleeps and retries once. For longer waits (daily quota exhaustion), it falls back to `NINEROUTER_FALLBACK_MODEL`.
 

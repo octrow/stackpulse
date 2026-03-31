@@ -52,92 +52,265 @@ from config import (
 
 SKILLS_SEED: dict[str, list[str]] = {
     "Languages": [
-        "python", "go", "golang", "rust", "java", "kotlin", "scala",
-        "typescript", "javascript", "c\\+\\+", "c#", "ruby", "php",
-        "elixir", "bash", "sql", "c",
+        "python",
+        "go",
+        "golang",
+        "rust",
+        "java",
+        "kotlin",
+        "scala",
+        "typescript",
+        "javascript",
+        "c\\+\\+",
+        "c#",
+        "ruby",
+        "php",
+        "elixir",
+        "bash",
+        "sql",
+        "c",
     ],
     "Python Frameworks": [
-        "fastapi", "django", "flask", "aiohttp", "starlette", "tornado",
-        "litestar", "sanic", "django rest framework", "drf", "nest.js",
+        "fastapi",
+        "django",
+        "flask",
+        "aiohttp",
+        "starlette",
+        "tornado",
+        "litestar",
+        "sanic",
+        "django rest framework",
+        "drf",
+        "nest.js",
         "django ninja",
     ],
     "Python Libraries": [
-        "sqlalchemy", "pydantic", "alembic", "celery", "pytest",
-        "httpx", "aiofiles", "asyncpg", "psycopg", "boto3",
-        "pandas", "numpy", "pydantic.v2", "typer", "click",
-        "poetry", "uv", "pillow", "duckdb", "dlt", "delta-rs",
+        "sqlalchemy",
+        "pydantic",
+        "alembic",
+        "celery",
+        "pytest",
+        "httpx",
+        "aiofiles",
+        "asyncpg",
+        "psycopg",
+        "boto3",
+        "pandas",
+        "numpy",
+        "pydantic.v2",
+        "typer",
+        "click",
+        "poetry",
+        "uv",
+        "pillow",
+        "duckdb",
+        "dlt",
+        "delta-rs",
         "pyproject.toml",
     ],
     "Databases — Relational": [
-        "postgresql", "postgres", "mysql", "mariadb", "sqlite",
-        "aurora", "cockroachdb", "tidb", "orm",
+        "postgresql",
+        "postgres",
+        "mysql",
+        "mariadb",
+        "sqlite",
+        "aurora",
+        "cockroachdb",
+        "tidb",
+        "orm",
     ],
     "Databases — NoSQL / Search": [
-        "mongodb", "redis", "elasticsearch", "opensearch",
-        "cassandra", "dynamodb", "firestore", "couchdb",
-        "neo4j", "memcached", "vector database", "vector store",
+        "mongodb",
+        "redis",
+        "elasticsearch",
+        "opensearch",
+        "cassandra",
+        "dynamodb",
+        "firestore",
+        "couchdb",
+        "neo4j",
+        "memcached",
+        "vector database",
+        "vector store",
     ],
     "Databases — Analytical": [
-        "clickhouse", "bigquery", "snowflake", "redshift",
-        "databricks", "dbt", "iceberg", "duckdb", "data lake",
+        "clickhouse",
+        "bigquery",
+        "snowflake",
+        "redshift",
+        "databricks",
+        "dbt",
+        "iceberg",
+        "duckdb",
+        "data lake",
     ],
     "Cloud": [
-        "aws", "gcp", "google cloud", "azure",
-        "lambda", "ec2", "ecs", "fargate", "s3",
-        "cloud run", "app engine", "azure functions",
-        "step functions", "bedrock", "api gateway", "cloudwatch", "x-ray",
+        "aws",
+        "gcp",
+        "google cloud",
+        "azure",
+        "lambda",
+        "ec2",
+        "ecs",
+        "fargate",
+        "s3",
+        "cloud run",
+        "app engine",
+        "azure functions",
+        "step functions",
+        "bedrock",
+        "api gateway",
+        "cloudwatch",
+        "x-ray",
     ],
     "Containers & Orchestration": [
-        "kubernetes", "k8s", "docker", "helm", "argo",
-        "istio", "envoy", "containerd", "eks",
+        "kubernetes",
+        "k8s",
+        "docker",
+        "helm",
+        "argo",
+        "istio",
+        "envoy",
+        "containerd",
+        "eks",
     ],
     "IaC & CI/CD": [
-        "terraform", "ansible", "pulumi", "cdk",
-        "ci/cd", "github actions", "gitlab ci", "jenkins",
-        "circleci", "argocd", "flux", "dagger",
+        "terraform",
+        "ansible",
+        "pulumi",
+        "cdk",
+        "ci/cd",
+        "github actions",
+        "gitlab ci",
+        "jenkins",
+        "circleci",
+        "argocd",
+        "flux",
+        "dagger",
     ],
     "Messaging & Streaming": [
-        "kafka", "rabbitmq", "sqs", "sns", "pubsub",
-        "nats", "activemq", "kinesis", "eventbridge",
+        "kafka",
+        "rabbitmq",
+        "sqs",
+        "sns",
+        "pubsub",
+        "nats",
+        "activemq",
+        "kinesis",
+        "eventbridge",
     ],
     "API & Architecture": [
-        "rest", "restful", "graphql", "grpc", "websocket",
-        "openapi", "swagger", "proto", "protobuf",
-        "microservices", "monolith", "serverless",
-        "event.driven", "event sourcing",
-        "cqrs", "domain.driven", "ddd",
-        "hexagonal", "clean architecture", "solid", "dry", "iam", "auth",
+        "rest",
+        "restful",
+        "graphql",
+        "grpc",
+        "websocket",
+        "openapi",
+        "swagger",
+        "proto",
+        "protobuf",
+        "microservices",
+        "monolith",
+        "serverless",
+        "event.driven",
+        "event sourcing",
+        "cqrs",
+        "domain.driven",
+        "ddd",
+        "hexagonal",
+        "clean architecture",
+        "solid",
+        "dry",
+        "iam",
+        "auth",
     ],
     "Auth & Security": [
-        "oauth", "oauth2", "openid", "oidc", "jwt",
-        "saml", "keycloak", "auth0", "okta",
-        "ssl", "tls", "vault", "rbac",
+        "oauth",
+        "oauth2",
+        "openid",
+        "oidc",
+        "jwt",
+        "saml",
+        "keycloak",
+        "auth0",
+        "okta",
+        "ssl",
+        "tls",
+        "vault",
+        "rbac",
     ],
     "Monitoring & Observability": [
-        "prometheus", "grafana", "datadog", "newrelic", "sentry",
-        "opentelemetry", "jaeger", "zipkin",
-        "elk", "loki", "splunk", "cloudwatch",
+        "prometheus",
+        "grafana",
+        "datadog",
+        "newrelic",
+        "sentry",
+        "opentelemetry",
+        "jaeger",
+        "zipkin",
+        "elk",
+        "loki",
+        "splunk",
+        "cloudwatch",
     ],
     "Testing": [
-        "pytest", "unittest", "tdd", "bdd",
-        "integration test", "unit test", "e2e",
-        "testcontainers", "hypothesis", "coverage.py", "gcov",
+        "pytest",
+        "unittest",
+        "tdd",
+        "bdd",
+        "integration test",
+        "unit test",
+        "e2e",
+        "testcontainers",
+        "hypothesis",
+        "coverage.py",
+        "gcov",
     ],
     "AI / ML (mentioned in JD)": [
-        "llm", "openai", "langchain", "langgraph", "llamaindex",
-        "vector database", "pgvector", "pinecone", "weaviate",
-        "rag", "fine.tun", "machine learning", "ml",
-        "generative ai", "agentic", "multi-agent", "prompt engineering",
-        "ai orchestration", "claude", "roo code", "cursor", "mcp",
+        "llm",
+        "openai",
+        "langchain",
+        "langgraph",
+        "llamaindex",
+        "vector database",
+        "pgvector",
+        "pinecone",
+        "weaviate",
+        "rag",
+        "fine.tun",
+        "machine learning",
+        "ml",
+        "generative ai",
+        "agentic",
+        "multi-agent",
+        "prompt engineering",
+        "ai orchestration",
+        "claude",
+        "roo code",
+        "cursor",
+        "mcp",
     ],
     "Soft / Process": [
-        "agile", "scrum", "kanban", "code review",
-        "mentoring", "team lead", "tech lead", "staff engineer",
-        "cross.functional", "stakeholder", "ownership",
+        "agile",
+        "scrum",
+        "kanban",
+        "code review",
+        "mentoring",
+        "team lead",
+        "tech lead",
+        "staff engineer",
+        "cross.functional",
+        "stakeholder",
+        "ownership",
     ],
     "Languages (non-technical)": [
-        "english", "german", "deutsch", "french", "spanish",
-        "dutch", "portuguese",
+        "english",
+        "german",
+        "deutsch",
+        "french",
+        "spanish",
+        "dutch",
+        "portuguese",
     ],
 }
 
@@ -145,42 +318,97 @@ SKILLS_SEED: dict[str, list[str]] = {
 
 # Generic terms that should never enter the taxonomy regardless of frequency
 SKIP_TERMS: set[str] = {
-    "api", "testing", "automation", "debugging", "configuration",
-    "scalability", "concurrency", "orchestration", "containerization",
-    "profiling", "modular code", "testable code", "object-oriented programming",
-    "async programming", "asynchronous programming", "error diagnosis",
-    "database optimization", "memory optimization", "orm optimization",
-    "restful apis", "rest apis", "ci/cd workflows", "ci/cd pipelines",
-    "agentic systems", "autonomous ai agents",
+    "api",
+    "testing",
+    "automation",
+    "debugging",
+    "configuration",
+    "scalability",
+    "concurrency",
+    "orchestration",
+    "containerization",
+    "profiling",
+    "modular code",
+    "testable code",
+    "object-oriented programming",
+    "async programming",
+    "asynchronous programming",
+    "error diagnosis",
+    "database optimization",
+    "memory optimization",
+    "orm optimization",
+    "restful apis",
+    "rest apis",
+    "ci/cd workflows",
+    "ci/cd pipelines",
+    "agentic systems",
+    "autonomous ai agents",
 }
 
 # Maps LLM output category names → taxonomy categories (seeded into DB once)
 LLM_CAT_SEED: list[tuple[str, str]] = [
-    ("languages",      "Languages"),
-    ("frameworks",     "Python Frameworks"),
-    ("libraries",      "Python Libraries"),
-    ("databases",      "Databases — Relational"),   # refined per-term by _DB_HINTS
+    ("languages", "Languages"),
+    ("frameworks", "Python Frameworks"),
+    ("libraries", "Python Libraries"),
+    ("databases", "Databases — Relational"),  # refined per-term by _DB_HINTS
     ("cloud_services", "Cloud"),
-    ("devops",         "IaC & CI/CD"),
-    ("tools",          "Containers & Orchestration"),
-    ("concepts",       "API & Architecture"),
+    ("devops", "IaC & CI/CD"),
+    ("tools", "Containers & Orchestration"),
+    ("concepts", "API & Architecture"),
 ]
 
 # Keyword hints to pick the right DB sub-category when LLM says "databases"
 _DB_HINTS: list[tuple[set[str], str]] = [
-    ({"postgresql", "postgres", "mysql", "mariadb", "aurora", "sqlite",
-      "cockroach", "tidb", "rds"},          "Databases — Relational"),
-    ({"redis", "mongo", "elastic", "opensearch", "dynamo", "cassandra",
-      "neo4j", "firestore", "couchdb", "nosql"},  "Databases — NoSQL / Search"),
-    ({"bigquery", "snowflake", "redshift", "databricks", "clickhouse",
-      "dbt", "iceberg", "duckdb", "data lake"}, "Databases — Analytical"),
+    (
+        {
+            "postgresql",
+            "postgres",
+            "mysql",
+            "mariadb",
+            "aurora",
+            "sqlite",
+            "cockroach",
+            "tidb",
+            "rds",
+        },
+        "Databases — Relational",
+    ),
+    (
+        {
+            "redis",
+            "mongo",
+            "elastic",
+            "opensearch",
+            "dynamo",
+            "cassandra",
+            "neo4j",
+            "firestore",
+            "couchdb",
+            "nosql",
+        },
+        "Databases — NoSQL / Search",
+    ),
+    (
+        {
+            "bigquery",
+            "snowflake",
+            "redshift",
+            "databricks",
+            "clickhouse",
+            "dbt",
+            "iceberg",
+            "duckdb",
+            "data lake",
+        },
+        "Databases — Analytical",
+    ),
 ]
 
 # Initial alias seeds: (taxonomy_term, alias_text, language, alias_type)
 # Only seeded when term_aliases table is empty.
 # More aliases can be added via SQL (see module docstring).
 ALIAS_SEED: list[tuple[str, str, str, str]] = [
-    ("python", "python3",  "en", "variant"),
+    ("python", "python3", "en", "variant"),
     ("python", "python 3", "en", "variant"),
 ]
 
@@ -199,6 +427,7 @@ _REPORT_TOP_MISSING_SKILLS_COUNT = 50
 
 
 # ── SQLite helpers ────────────────────────────────────────────────────────────
+
 
 def open_db(data_dir: Path) -> sqlite3.Connection:
     """Open (or create) the SQLite skills database in data_dir."""
@@ -377,7 +606,9 @@ def promote_llm_to_candidates(conn: sqlite3.Connection, threshold: int = 2) -> i
     Returns the number of newly added candidates.
     """
     category_map = dict(
-        conn.execute("SELECT llm_category, taxonomy_category FROM llm_category_map").fetchall()
+        conn.execute(
+            "SELECT llm_category, taxonomy_category FROM llm_category_map"
+        ).fetchall()
     )
 
     # Taxonomy existence check uses plain-text keys (re.escape undone) so that
@@ -392,19 +623,26 @@ def promote_llm_to_candidates(conn: sqlite3.Connection, threshold: int = 2) -> i
         row["canonical"] for row in conn.execute("SELECT canonical FROM term_aliases")
     }
 
-    # Existing candidates keyed by canonical → current jobs_count
-    existing_candidates: dict[str, int] = {
-        row["canonical"]: row["jobs_count"]
-        for row in conn.execute("SELECT canonical, jobs_count FROM taxonomy_candidates")
+    known_taxonomy_terms = existing_taxonomy_keys | existing_alias_canonicals
+
+    # Existing candidates keyed by (canonical, taxonomy_category) → current jobs_count
+    existing_candidates: dict[tuple[str, str], int] = {
+        (row["canonical"], row["taxonomy_category"]): row["jobs_count"]
+        for row in conn.execute(
+            "SELECT canonical, taxonomy_category, jobs_count FROM taxonomy_candidates"
+        )
     }
 
-    llm_rows = conn.execute("""
+    llm_rows = conn.execute(
+        """
         SELECT skill, category, COUNT(DISTINCT url_key) AS n
         FROM llm_results
         GROUP BY skill, category
         HAVING n >= ?
         ORDER BY n DESC
-    """, (threshold,)).fetchall()
+    """,
+        (threshold,),
+    ).fetchall()
 
     newly_added_count = updated_count = 0
     today = date.today().isoformat()
@@ -416,21 +654,21 @@ def promote_llm_to_candidates(conn: sqlite3.Connection, threshold: int = 2) -> i
 
         if skill.lower() in SKIP_TERMS:
             continue
-        if skill.strip().lower() in existing_taxonomy_keys:
-            continue
 
         canonical = normalize_term(skill)
+        taxonomy_key = _taxonomy_plain_key(skill)
 
-        if canonical in existing_alias_canonicals:
+        if canonical in known_taxonomy_terms or taxonomy_key in known_taxonomy_terms:
             continue
 
         taxonomy_category = resolve_category(llm_category, skill, category_map)
+        candidate_key = (canonical, taxonomy_category)
 
-        if canonical in existing_candidates:
-            if jobs_count > existing_candidates[canonical]:
+        if candidate_key in existing_candidates:
+            if jobs_count > existing_candidates[candidate_key]:
                 conn.execute(
-                    "UPDATE taxonomy_candidates SET jobs_count=? WHERE canonical=?",
-                    (jobs_count, canonical),
+                    "UPDATE taxonomy_candidates SET jobs_count=? WHERE canonical=? AND taxonomy_category=?",
+                    (jobs_count, canonical, taxonomy_category),
                 )
                 updated_count += 1
         else:
@@ -441,6 +679,7 @@ def promote_llm_to_candidates(conn: sqlite3.Connection, threshold: int = 2) -> i
                 (skill, canonical, taxonomy_category, llm_category, jobs_count, today),
             )
             newly_added_count += 1
+            existing_candidates[candidate_key] = jobs_count
 
     conn.commit()
 
@@ -448,8 +687,8 @@ def promote_llm_to_candidates(conn: sqlite3.Connection, threshold: int = 2) -> i
         "SELECT COUNT(*) FROM taxonomy_candidates WHERE status='pending'"
     ).fetchone()[0]
     print(
-        f"  [Candidates] {newly_added_count} new, {updated_count} updated "
-        f"(threshold >=\u2009{threshold} jobs) \u2192 {pending_count} total pending"
+        f"  [Candidates queue] {newly_added_count} new, {updated_count} updated "
+        f"(threshold >=\u2009{threshold} jobs) \u2192 {pending_count} pending review rows"
     )
     return newly_added_count
 
@@ -471,9 +710,11 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
         print(f"  [Promote] No pending candidates with jobs_count >= {min_jobs}.")
         return 0
 
-    print(f"\n  [Promote] Adding {len(candidate_rows)} terms to taxonomy (threshold >=\u2009{min_jobs} jobs):")
+    print(
+        f"\n  [Promote] Adding {len(candidate_rows)} terms to taxonomy (threshold >=\u2009{min_jobs} jobs):"
+    )
     print(f"  {'Term':<28} {'Category':<32} {'Jobs'}")
-    print(f"  {'-'*28} {'-'*32} {'-'*4}")
+    print(f"  {'-' * 28} {'-' * 32} {'-' * 4}")
     for row in candidate_rows:
         print(f"  {row['term']:<28} {row['taxonomy_category']:<32} {row['jobs_count']}")
         conn.execute(
@@ -481,8 +722,10 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
             (row["taxonomy_category"], row["canonical"]),
         )
         conn.execute(
-            "UPDATE taxonomy_candidates SET status='approved' WHERE canonical=?",
-            (row["canonical"],),
+            """UPDATE taxonomy_candidates
+               SET status='approved'
+               WHERE canonical=? AND taxonomy_category=?""",
+            (row["canonical"], row["taxonomy_category"]),
         )
 
     conn.commit()
@@ -505,16 +748,21 @@ def print_candidates(conn: sqlite3.Connection) -> None:
 
     status_counts: Counter = Counter(row["status"] for row in rows)
     print(
-        f"\nTaxonomy candidates: {len(rows)} total  "
+        f"\nTaxonomy candidates (all statuses): {len(rows)} total  "
         f"({status_counts.get('pending', 0)} pending, "
         f"{status_counts.get('approved', 0)} approved, "
         f"{status_counts.get('rejected', 0)} rejected)"
     )
+    print(
+        "  Note: this queue summary is separate from taxonomy/alias coverage gaps shown in --llm output."
+    )
 
     pending_rows = [row for row in rows if row["status"] == "pending"]
     if pending_rows:
-        print(f"\n  {'Term':<25} {'Category':<{_REPORT_CATEGORY_WIDTH}} {'LLM Cat':<15} {'Jobs'}")
-        print(f"  {'-'*25} {'-'*_REPORT_CATEGORY_WIDTH} {'-'*15} {'-'*4}")
+        print(
+            f"\n  {'Term':<25} {'Category':<{_REPORT_CATEGORY_WIDTH}} {'LLM Cat':<15} {'Jobs'}"
+        )
+        print(f"  {'-' * 25} {'-' * _REPORT_CATEGORY_WIDTH} {'-' * 15} {'-' * 4}")
         for row in pending_rows:
             print(
                 f"  {row['term']:<25} {row['taxonomy_category']:<{_REPORT_CATEGORY_WIDTH}} "
@@ -558,7 +806,9 @@ def _url_key(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()
 
 
-def _llm_cache_get(conn: sqlite3.Connection, url_key: str) -> dict[str, list[str]] | None:
+def _llm_cache_get(
+    conn: sqlite3.Connection, url_key: str
+) -> dict[str, list[str]] | None:
     """Return cached LLM extraction results for url_key, or None if not cached."""
     rows = conn.execute(
         "SELECT category, skill FROM llm_results WHERE url_key = ?", (url_key,)
@@ -625,6 +875,68 @@ def _llm_call(client, model: str, text: str) -> dict[str, list[str]]:
     return json.loads(raw)
 
 
+def _call_llm_with_retry(
+    client,
+    model: str,
+    text: str,
+    url: str,
+    attempt_label: str,
+) -> dict[str, list[str]] | None:
+    """Execute one LLM call with at most one retry on short 429 windows."""
+    from openai import RateLimitError
+
+    try:
+        return _llm_call(client, model, text)
+    except RateLimitError as rate_limit_error:
+        wait_seconds = _parse_retry_after(str(rate_limit_error))
+        if wait_seconds is not None and wait_seconds <= LLM_RATE_LIMIT_MAX_WAIT_SECONDS:
+            print(
+                f"  [LLM] 429 on {attempt_label} — sleeping {wait_seconds}s then retrying …"
+            )
+            try:
+                time.sleep(wait_seconds)
+            except KeyboardInterrupt:
+                raise
+            try:
+                return _llm_call(client, model, text)
+            except RateLimitError as retry_error:
+                print(f"  [LLM] 429 again after retry ({attempt_label}): {retry_error}")
+                return None
+
+        wait_display = f"{wait_seconds}s" if wait_seconds else "unknown"
+        print(
+            f"  [LLM] 429 on {attempt_label} — wait {wait_display} exceeds limit, "
+            f"skipping primary"
+        )
+        return None
+    except Exception as error:
+        print(f"  [LLM] Warning: extraction failed for {url[:60]}: {error}")
+        return None
+
+
+def _extract_skills_with_models(
+    text: str,
+    url: str,
+    client,
+) -> dict[str, list[str]] | None:
+    """Run primary model, then optional fallback model on failure."""
+    result = _call_llm_with_retry(client, NINEROUTER_MODEL, text, url, NINEROUTER_MODEL)
+    if result is not None:
+        return result
+
+    if not NINEROUTER_FALLBACK_MODEL:
+        return None
+
+    print(f"  [LLM] Trying fallback model: {NINEROUTER_FALLBACK_MODEL}")
+    return _call_llm_with_retry(
+        client,
+        NINEROUTER_FALLBACK_MODEL,
+        text,
+        url,
+        f"fallback:{NINEROUTER_FALLBACK_MODEL}",
+    )
+
+
 def extract_skills_llm(
     text: str, url: str, conn: sqlite3.Connection, client
 ) -> dict[str, list[str]]:
@@ -635,50 +947,12 @@ def extract_skills_llm(
       - If NINEROUTER_FALLBACK_MODEL is configured, tries that next.
       - Otherwise logs a warning and returns {}.
     """
-    from openai import RateLimitError
-
     cache_key = _url_key(url)
     cached = _llm_cache_get(conn, cache_key)
     if cached is not None:
         return cached
 
-    def _attempt_llm_call(model: str, attempt_label: str) -> dict[str, list[str]] | None:
-        try:
-            return _llm_call(client, model, text)
-        except RateLimitError as rate_limit_error:
-            wait_seconds = _parse_retry_after(str(rate_limit_error))
-            if wait_seconds is not None and wait_seconds <= LLM_RATE_LIMIT_MAX_WAIT_SECONDS:
-                print(
-                    f"  [LLM] 429 on {attempt_label} — sleeping {wait_seconds}s then retrying …"
-                )
-                try:
-                    time.sleep(wait_seconds)
-                except KeyboardInterrupt:
-                    raise
-                try:
-                    return _llm_call(client, model, text)
-                except RateLimitError as retry_error:
-                    print(f"  [LLM] 429 again after retry ({attempt_label}): {retry_error}")
-                    return None
-            else:
-                wait_display = f"{wait_seconds}s" if wait_seconds else "unknown"
-                print(
-                    f"  [LLM] 429 on {attempt_label} — wait {wait_display} exceeds limit, "
-                    f"skipping primary"
-                )
-                return None
-        except Exception as error:
-            print(f"  [LLM] Warning: extraction failed for {url[:60]}: {error}")
-            return None
-
-    result = _attempt_llm_call(NINEROUTER_MODEL, NINEROUTER_MODEL)
-
-    if result is None and NINEROUTER_FALLBACK_MODEL:
-        print(f"  [LLM] Trying fallback model: {NINEROUTER_FALLBACK_MODEL}")
-        result = _attempt_llm_call(
-            NINEROUTER_FALLBACK_MODEL, f"fallback:{NINEROUTER_FALLBACK_MODEL}"
-        )
-
+    result = _extract_skills_with_models(text, url, client)
     if result is None:
         return {}
 
@@ -756,20 +1030,24 @@ def analyze(
         if llm_client and conn is not None:
             llm_skills = extract_skills_llm(combined_text, url, conn, llm_client)
 
-        job_rows.append({
-            "job_title": job.get("job_title"),
-            "company": job.get("company"),
-            "location": job.get("location"),
-            "search_location": job.get("search_location"),
-            "posted_date": job.get("posted_date"),
-            "salary_extracted": job.get("salary_extracted"),
-            "linkedin_url": url,
-            "scraped_date": job.get("scraped_date"),
-            "applicant_count": job.get("applicant_count"),
-            "skills_raw": skills_found,
-            "all_skills_flat": [skill for hits in skills_found.values() for skill in hits],
-            "skills_llm": llm_skills,
-        })
+        job_rows.append(
+            {
+                "job_title": job.get("job_title"),
+                "company": job.get("company"),
+                "location": job.get("location"),
+                "search_location": job.get("search_location"),
+                "posted_date": job.get("posted_date"),
+                "salary_extracted": job.get("salary_extracted"),
+                "linkedin_url": url,
+                "scraped_date": job.get("scraped_date"),
+                "applicant_count": job.get("applicant_count"),
+                "skills_raw": skills_found,
+                "all_skills_flat": [
+                    skill for hits in skills_found.values() for skill in hits
+                ],
+                "skills_llm": llm_skills,
+            }
+        )
 
     return pd.DataFrame(job_rows)
 
@@ -783,8 +1061,10 @@ def _print_top_skills(df: pd.DataFrame) -> None:
     print(f"\nTop {_REPORT_TOP_SKILLS_COUNT} skills mentioned across all postings:")
     for skill, count in all_skills.most_common(_REPORT_TOP_SKILLS_COUNT):
         percentage = count / len(df) * 100
-        bar = "█" * int(percentage / 2)
-        print(f"  {skill:<{_REPORT_SKILL_WIDTH}} {count:>4} jobs  ({percentage:>5.1f}%)  {bar}")
+        percentage_bar = "█" * int(percentage / 2)
+        print(
+            f"  {skill:<{_REPORT_SKILL_WIDTH}} {count:>4} jobs  ({percentage:>5.1f}%)  {percentage_bar}"
+        )
 
 
 def _print_category_breakdown(
@@ -805,7 +1085,9 @@ def _print_category_breakdown(
 
         top_terms = ", ".join(
             f"{term}({count})"
-            for term, count in category_counter.most_common(_REPORT_TOP_CATEGORIES_COUNT)
+            for term, count in category_counter.most_common(
+                _REPORT_TOP_CATEGORIES_COUNT
+            )
         )
         print(f"  {category:<{_REPORT_CATEGORY_WIDTH}} {top_terms}")
 
@@ -813,7 +1095,9 @@ def _print_category_breakdown(
 def _print_top_locations(df: pd.DataFrame) -> None:
     """Print the most frequent locations in scraped results."""
     print("\nTop locations in results:")
-    for location, count in df["location"].value_counts().head(_REPORT_TOP_LOCATIONS_COUNT).items():
+    for location, count in (
+        df["location"].value_counts().head(_REPORT_TOP_LOCATIONS_COUNT).items()
+    ):
         print(f"  {location:<{_REPORT_LOCATION_WIDTH}} {count}")
 
 
@@ -825,26 +1109,19 @@ def _print_salary_hints(df: pd.DataFrame) -> None:
         print(f"  {row['job_title'] or 'N/A':<40} {row['salary_extracted']}")
 
 
-def _print_llm_section(
-    df: pd.DataFrame,
-    taxonomy: dict[str, list[tuple[str, str]]],
-) -> None:
-    """Print LLM extraction aggregates and taxonomy coverage gaps."""
-    if "skills_llm" not in df.columns or not df["skills_llm"].apply(bool).any():
-        return
-
-    print(f"\n{'=' * 60}")
-    print("LLM-EXTRACTED SKILLS (open taxonomy)")
-    print(f"{'=' * 60}")
-
+def _aggregate_llm_skills(skills_llm_list: list[dict]) -> dict[str, Counter]:
+    """Aggregate LLM skills by category across all jobs."""
     llm_skill_aggregates: dict[str, Counter] = {}
-    skills_llm_list: list[dict] = df["skills_llm"].tolist()
     for llm_skills in skills_llm_list:
         if not llm_skills:
             continue
         for category, skills in llm_skills.items():
             llm_skill_aggregates.setdefault(category, Counter()).update(skills)
+    return llm_skill_aggregates
 
+
+def _print_llm_skill_aggregates(llm_skill_aggregates: dict[str, Counter]) -> None:
+    """Print top LLM-discovered terms per LLM category."""
     for category, counter in sorted(llm_skill_aggregates.items()):
         if not counter:
             continue
@@ -854,34 +1131,128 @@ def _print_llm_section(
         )
         print(f"  {category:<{_REPORT_LLM_CATEGORY_WIDTH}} {top_terms}")
 
-    all_taxonomy_terms = {
-        display.lower()
+
+def _taxonomy_term_set(taxonomy: dict[str, list[tuple[str, str]]]) -> set[str]:
+    """Return normalized taxonomy keys (including aliases) for membership checks."""
+    return {
+        _taxonomy_plain_key(pattern)
         for terms in taxonomy.values()
-        for display, _ in terms
+        for _, pattern in terms
     }
+
+
+def _count_missing_taxonomy_terms(
+    skills_llm_list: list[dict],
+    all_taxonomy_terms: set[str],
+) -> Counter:
+    """Count LLM terms absent from current taxonomy/alias coverage."""
     skills_missing_from_taxonomy: Counter = Counter()
     for llm_skills in skills_llm_list:
         for skills in (llm_skills or {}).values():
             for skill in skills:
-                if skill.lower() not in all_taxonomy_terms:
-                    skills_missing_from_taxonomy[skill.lower()] += 1
+                canonical = normalize_term(skill)
+                taxonomy_key = _taxonomy_plain_key(skill)
+                if (
+                    canonical not in all_taxonomy_terms
+                    and taxonomy_key not in all_taxonomy_terms
+                ):
+                    skills_missing_from_taxonomy[canonical] += 1
+    return skills_missing_from_taxonomy
 
+
+def _build_actionable_missing_terms(
+    skills_missing_from_taxonomy: Counter,
+    existing_candidate_canonicals: set[str],
+    threshold: int,
+) -> Counter:
+    """Filter uncovered terms to queue-actionable terms."""
+    skip_canonicals = {normalize_term(term) for term in SKIP_TERMS}
+    return Counter(
+        {
+            canonical: count
+            for canonical, count in skills_missing_from_taxonomy.items()
+            if count >= threshold
+            and canonical not in skip_canonicals
+            and canonical not in existing_candidate_canonicals
+        }
+    )
+
+
+def _print_missing_taxonomy_terms(
+    skills_missing_from_taxonomy: Counter,
+    actionable_missing_terms: Counter,
+    threshold: int,
+) -> None:
+    """Print uncovered LLM terms and queue-actionable subset."""
     if not skills_missing_from_taxonomy:
         return
 
     print(
-        f"\nSkills found by LLM but MISSING from taxonomy "
+        f"\nLLM terms not covered by current taxonomy/aliases "
         f"({len(skills_missing_from_taxonomy)} terms):"
     )
+    print(
+        f"  Actionable for queue (threshold >= {threshold}, not SKIP_TERMS, not already queued): "
+        f"{len(actionable_missing_terms)} terms"
+    )
+
     for skill, count in skills_missing_from_taxonomy.most_common(
         _REPORT_TOP_MISSING_SKILLS_COUNT
     ):
-        print(f"  {skill:<{_REPORT_SKILL_WIDTH}} {count} jobs")
+        display_skill = re.sub(r"\\(.)", r"\1", skill)
+        print(f"  {display_skill:<{_REPORT_SKILL_WIDTH}} {count} jobs")
+
+    if actionable_missing_terms:
+        print("\nTop actionable uncovered terms:")
+        for skill, count in actionable_missing_terms.most_common(
+            _REPORT_TOP_MISSING_SKILLS_COUNT
+        ):
+            display_skill = re.sub(r"\\(.)", r"\1", skill)
+            print(f"  {display_skill:<{_REPORT_SKILL_WIDTH}} {count} jobs")
+
+    print("  Note: raw uncovered count is broader than pending queue by design.")
+
+
+def _print_llm_section(
+    df: pd.DataFrame,
+    taxonomy: dict[str, list[tuple[str, str]]],
+    existing_candidate_canonicals: set[str],
+    candidate_threshold: int,
+) -> None:
+    """Print LLM extraction aggregates and taxonomy coverage gaps."""
+    if "skills_llm" not in df.columns or not df["skills_llm"].apply(bool).any():
+        return
+
+    print(f"\n{'=' * 60}")
+    print("LLM-EXTRACTED SKILLS (open taxonomy)")
+    print(f"{'=' * 60}")
+
+    skills_llm_list: list[dict] = df["skills_llm"].tolist()
+    llm_skill_aggregates = _aggregate_llm_skills(skills_llm_list)
+    _print_llm_skill_aggregates(llm_skill_aggregates)
+
+    all_taxonomy_terms = _taxonomy_term_set(taxonomy)
+    skills_missing_from_taxonomy = _count_missing_taxonomy_terms(
+        skills_llm_list,
+        all_taxonomy_terms,
+    )
+    actionable_missing_terms = _build_actionable_missing_terms(
+        skills_missing_from_taxonomy,
+        existing_candidate_canonicals,
+        candidate_threshold,
+    )
+    _print_missing_taxonomy_terms(
+        skills_missing_from_taxonomy,
+        actionable_missing_terms,
+        candidate_threshold,
+    )
 
 
 def print_report(
     df: pd.DataFrame,
     taxonomy: dict[str, list[tuple[str, str]]],
+    existing_candidate_canonicals: set[str],
+    candidate_threshold: int,
 ) -> None:
     """Print a human-readable frequency analysis to stdout."""
     print(f"\n{'=' * 60}")
@@ -892,7 +1263,7 @@ def print_report(
     _print_category_breakdown(df, taxonomy)
     _print_top_locations(df)
     _print_salary_hints(df)
-    _print_llm_section(df, taxonomy)
+    _print_llm_section(df, taxonomy, existing_candidate_canonicals, candidate_threshold)
 
 
 def save_excel(
@@ -957,6 +1328,7 @@ def _build_llm_client(base_url: str, model: str):
     """Initialise and return an OpenAI-compatible client for 9router, or None on failure."""
     try:
         from openai import OpenAI
+
         client = OpenAI(base_url=base_url, api_key="local")
         print(f"LLM extraction enabled → {model} via 9router")
         return client
@@ -972,7 +1344,9 @@ def main() -> None:
     """Parse CLI arguments and run the requested analysis / promotion workflow."""
     parser = argparse.ArgumentParser(description="Analyze scraped LinkedIn jobs")
     parser.add_argument("--file", type=str, help="Specific JSON file to analyze")
-    parser.add_argument("--all", action="store_true", help="Merge all JSON files in data/")
+    parser.add_argument(
+        "--all", action="store_true", help="Merge all JSON files in data/"
+    )
     parser.add_argument(
         "--llm",
         action="store_true",
@@ -1026,7 +1400,9 @@ def main() -> None:
 
     taxonomy = load_taxonomy(conn)
     term_count = sum(len(terms) for terms in taxonomy.values())
-    print(f"Taxonomy loaded: {term_count} terms (+ aliases) across {len(taxonomy)} categories")
+    print(
+        f"Taxonomy loaded: {term_count} terms (+ aliases) across {len(taxonomy)} categories"
+    )
 
     print(f"Loading from: {[str(p) for p in paths]}")
     jobs = load_jobs(paths)
@@ -1040,15 +1416,28 @@ def main() -> None:
     if args.llm:
         llm_client = _build_llm_client(NINEROUTER_BASE_URL, NINEROUTER_MODEL)
 
+    candidate_threshold = 2
+    existing_candidate_canonicals: set[str] = set()
+
     df = analyze(jobs, taxonomy, llm_client=llm_client, conn=conn)
 
     # After LLM extraction, auto-queue newly discovered terms as candidates
     if args.llm and llm_client:
-        promote_llm_to_candidates(conn, threshold=2)
+        promote_llm_to_candidates(conn, threshold=candidate_threshold)
+
+    existing_candidate_canonicals = {
+        row["canonical"]
+        for row in conn.execute("SELECT canonical FROM taxonomy_candidates")
+    }
 
     conn.close()
 
-    print_report(df, taxonomy)
+    print_report(
+        df,
+        taxonomy,
+        existing_candidate_canonicals=existing_candidate_canonicals,
+        candidate_threshold=candidate_threshold,
+    )
 
     output_stem = paths[0].stem if len(paths) == 1 else "jobs_all"
     save_excel(df, data_dir / f"{output_stem}_analysis.xlsx", taxonomy)

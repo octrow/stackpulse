@@ -9,7 +9,11 @@ import logging
 import pathlib
 from typing import Callable
 
-from playwright.async_api import Page, TimeoutError as PWTimeout
+from playwright.async_api import (
+    Error as PlaywrightError,
+    Page,
+    TimeoutError as PWTimeout,
+)
 
 from config import (
     OUTPUT_DIR,
@@ -89,8 +93,14 @@ async def scrape_job(page: Page, url: str) -> dict:
             if await button.count() > 0:
                 await button.click(timeout=BUTTON_CLICK_TIMEOUT_MS)
                 await asyncio.sleep(POST_CLICK_SETTLE_SECONDS)
-        except Exception:
-            pass
+        except (PWTimeout, PlaywrightError) as error:
+            logger.debug(
+                "Expand button click failed for '%s' on %s (%s): %s",
+                button_label,
+                url,
+                type(error).__name__,
+                error,
+            )
 
     # Small settle wait after any click
     await asyncio.sleep(POST_EXPAND_SETTLE_SECONDS)
@@ -137,7 +147,7 @@ async def _extract_text(locator, timeout_ms: int = 3_000) -> str | None:
     try:
         text = await locator.first.inner_text(timeout=timeout_ms)
         return text.strip() or None
-    except Exception:
+    except (PWTimeout, PlaywrightError):
         return None
 
 
@@ -158,7 +168,13 @@ async def _find_text_matching(
                 text = (await element.inner_text()).strip()
                 if text and predicate(text):
                     return text
-        except Exception:
+        except (PWTimeout, PlaywrightError) as error:
+            logger.debug(
+                "Selector '%s' failed during text match (%s): %s",
+                selector,
+                type(error).__name__,
+                error,
+            )
             continue
     return None
 
@@ -192,17 +208,23 @@ async def _get_company(page: Page) -> tuple[str | None, str | None]:
                 if text and len(text) > 1 and "logo" not in text.lower():
                     href = await link.get_attribute("href") or ""
                     return text, _normalise_company_url(href)
-        except Exception:
+        except (PWTimeout, PlaywrightError) as error:
+            logger.debug(
+                "Selector '%s' failed during text match (%s): %s",
+                selector,
+                type(error).__name__,
+                error,
+            )
             continue
     return None, None
 
 
 async def _get_location(page: Page) -> str | None:
     """Extract the job location string."""
+
     def _is_location(text: str) -> bool:
-        return (
-            3 < len(text) < 80
-            and ("," in text or "Remote" in text or "Hybrid" in text)
+        return 3 < len(text) < 80 and (
+            "," in text or "Remote" in text or "Hybrid" in text
         )
 
     return await _find_text_matching(page, _LOCATION_SELECTORS, _is_location)
@@ -213,7 +235,9 @@ async def _get_posted_date(page: Page) -> str | None:
     _DATE_KEYWORDS = ("ago", "hour", "day", "week", "month", "reposted")
 
     def _is_posted_date(text: str) -> bool:
-        return len(text) < 60 and any(keyword in text.lower() for keyword in _DATE_KEYWORDS)
+        return len(text) < 60 and any(
+            keyword in text.lower() for keyword in _DATE_KEYWORDS
+        )
 
     return await _find_text_matching(page, _POSTED_DATE_SELECTORS, _is_posted_date)
 
@@ -223,7 +247,9 @@ async def _get_applicants(page: Page) -> str | None:
     _APPLICANT_KEYWORDS = ("applicant", "people clicked", "applied")
 
     def _is_applicant_count(text: str) -> bool:
-        return len(text) < 80 and any(keyword in text.lower() for keyword in _APPLICANT_KEYWORDS)
+        return len(text) < 80 and any(
+            keyword in text.lower() for keyword in _APPLICANT_KEYWORDS
+        )
 
     return await _find_text_matching(page, _APPLICANT_SELECTORS, _is_applicant_count)
 
@@ -240,7 +266,13 @@ async def _get_description(page: Page) -> str | None:
                 text = (await element.inner_text()).strip()
                 if text and len(text) > DESCRIPTION_MIN_CHARS:
                     return text
-        except Exception:
+        except (PWTimeout, PlaywrightError) as error:
+            logger.debug(
+                "Selector '%s' failed during text match (%s): %s",
+                selector,
+                type(error).__name__,
+                error,
+            )
             continue
 
     # Last resort: find "About the job" section and grab surrounding text
@@ -252,7 +284,11 @@ async def _get_description(page: Page) -> str | None:
                 text = (await parent.inner_text()).strip()
                 if text and len(text) > DESCRIPTION_MIN_CHARS:
                     return text
-    except Exception:
-        pass
+    except (PWTimeout, PlaywrightError) as error:
+        logger.debug(
+            "Fallback 'About the job' extraction failed (%s): %s",
+            type(error).__name__,
+            error,
+        )
 
     return None

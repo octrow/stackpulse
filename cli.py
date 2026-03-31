@@ -35,9 +35,7 @@ def _run_command(command: list[str], label: str, cwd: Path | None = None) -> Non
 
 
 def _deps_installed(venv_python: Path) -> bool:
-    probe = (
-        "import linkedin_scraper, playwright, dotenv, pandas, openpyxl, openai, typer, rich"
-    )
+    probe = "import linkedin_scraper, playwright, dotenv, pandas, openpyxl, openai, typer, rich"
     try:
         subprocess.run(
             [str(venv_python), "-c", probe],
@@ -74,7 +72,9 @@ def setup_session_command() -> None:
     try:
         from setup_session import main as setup_session_main
 
-        with console.status("[bold cyan]Running LinkedIn session setup...", spinner="dots"):
+        with console.status(
+            "[bold cyan]Running LinkedIn session setup...", spinner="dots"
+        ):
             asyncio.run(setup_session_main())
         console.print("[green]Session setup complete.[/green]")
     except Exception as exc:  # noqa: BLE001
@@ -84,7 +84,9 @@ def setup_session_command() -> None:
 
 @app.command()
 def scrape(
-    limit: Optional[int] = typer.Option(None, "--limit", min=1, help="Max jobs per query"),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", min=1, help="Max jobs per query"
+    ),
     fresh: bool = typer.Option(False, "--fresh", help="Ignore previously scraped URLs"),
 ) -> None:
     """Run scraper using current config defaults unless overridden."""
@@ -96,6 +98,9 @@ def scrape(
         with console.status("[bold cyan]Running scrape workflow...", spinner="dots"):
             asyncio.run(scrape_all(limit_per_query=effective_limit, fresh=fresh))
         console.print("[green]Scrape completed.[/green]")
+    except KeyboardInterrupt:
+        console.print("[yellow]Scrape interrupted by user.[/yellow]")
+        raise typer.Exit(code=130)
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]scrape failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -104,8 +109,12 @@ def scrape(
 @app.command()
 def analyze(
     file: Optional[Path] = typer.Option(None, "--file", help="Specific jobs JSON file"),
-    all_files: bool = typer.Option(False, "--all", help="Analyze all data/jobs_*.json files"),
-    llm: bool = typer.Option(False, "--llm", help="Enable open-taxonomy LLM extraction"),
+    all_files: bool = typer.Option(
+        False, "--all", help="Analyze all data/jobs_*.json files"
+    ),
+    llm: bool = typer.Option(
+        False, "--llm", help="Enable open-taxonomy LLM extraction"
+    ),
     promote: Optional[int] = typer.Option(
         None,
         "--promote",
@@ -193,12 +202,20 @@ def analyze(
 @app.command()
 def auto(
     venv: Path = typer.Option(Path(".venv"), "--venv", help="Virtual environment path"),
-    python: str = typer.Option(sys.executable, "--python", help="Python executable for venv creation"),
-    limit: Optional[int] = typer.Option(None, "--limit", min=1, help="Max jobs per query"),
+    python: str = typer.Option(
+        sys.executable, "--python", help="Python executable for venv creation"
+    ),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", min=1, help="Max jobs per query"
+    ),
     fresh: bool = typer.Option(False, "--fresh", help="Ignore previously scraped URLs"),
     all_files: bool = typer.Option(False, "--all", help="Analyze all jobs files"),
-    llm: bool = typer.Option(False, "--llm", help="Enable LLM extraction during analyze"),
-    promote: Optional[int] = typer.Option(None, "--promote", min=1, help="Promote pending candidates >= N"),
+    llm: bool = typer.Option(
+        False, "--llm", help="Enable LLM extraction during analyze"
+    ),
+    promote: Optional[int] = typer.Option(
+        None, "--promote", min=1, help="Promote pending candidates >= N"
+    ),
 ) -> None:
     """Run bootstrap + session + scrape + analyze end-to-end."""
     rows: list[tuple[str, str, str]] = []
@@ -208,39 +225,75 @@ def auto(
 
     try:
         if not venv_python.exists():
-            _run_command([python, "-m", "venv", str(venv_path)], "Creating virtual environment", cwd=repo_root)
+            _run_command(
+                [python, "-m", "venv", str(venv_path)],
+                "Creating virtual environment",
+                cwd=repo_root,
+            )
             rows.append(("Create venv", "[green]done[/green]", str(venv_path)))
         else:
-            rows.append(("Create venv", "[yellow]skip[/yellow]", f"exists: {venv_path}"))
+            rows.append(
+                ("Create venv", "[yellow]skip[/yellow]", f"exists: {venv_path}")
+            )
 
         if _deps_installed(venv_python):
-            rows.append(("Install dependencies", "[yellow]skip[/yellow]", "requirements already satisfied"))
+            rows.append(
+                (
+                    "Install dependencies",
+                    "[yellow]skip[/yellow]",
+                    "requirements already satisfied",
+                )
+            )
         else:
             _run_command(
                 [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
                 "Installing dependencies",
                 cwd=repo_root,
             )
-            rows.append(("Install dependencies", "[green]done[/green]", "pip install -r requirements.txt"))
+            rows.append(
+                (
+                    "Install dependencies",
+                    "[green]done[/green]",
+                    "pip install -r requirements.txt",
+                )
+            )
 
         if _chromium_installed():
-            rows.append(("Install Chromium", "[yellow]skip[/yellow]", "Playwright Chromium already present"))
+            rows.append(
+                (
+                    "Install Chromium",
+                    "[yellow]skip[/yellow]",
+                    "Playwright Chromium already present",
+                )
+            )
         else:
             _run_command(
                 [str(venv_python), "-m", "playwright", "install", "chromium"],
                 "Installing Playwright Chromium",
                 cwd=repo_root,
             )
-            rows.append(("Install Chromium", "[green]done[/green]", "playwright install chromium"))
+            rows.append(
+                (
+                    "Install Chromium",
+                    "[green]done[/green]",
+                    "playwright install chromium",
+                )
+            )
 
         from config import JOBS_PER_QUERY, SESSION_FILE
 
         session_path = repo_root / SESSION_FILE
         if session_path.exists():
-            rows.append(("Setup session", "[yellow]skip[/yellow]", f"exists: {SESSION_FILE}"))
+            rows.append(
+                ("Setup session", "[yellow]skip[/yellow]", f"exists: {SESSION_FILE}")
+            )
         else:
-            console.print("[cyan]Session file missing. Starting interactive setup-session...[/cyan]")
-            subprocess.run([str(venv_python), "setup_session.py"], cwd=repo_root, check=True)
+            console.print(
+                "[cyan]Session file missing. Starting interactive setup-session...[/cyan]"
+            )
+            subprocess.run(
+                [str(venv_python), "setup_session.py"], cwd=repo_root, check=True
+            )
             rows.append(("Setup session", "[green]done[/green]", SESSION_FILE))
 
         scrape_limit = limit if limit is not None else JOBS_PER_QUERY
@@ -248,7 +301,9 @@ def auto(
         if fresh:
             scrape_cmd.append("--fresh")
         _run_command(scrape_cmd, "Running scrape", cwd=repo_root)
-        rows.append(("Scrape", "[green]done[/green]", f"limit={scrape_limit}, fresh={fresh}"))
+        rows.append(
+            ("Scrape", "[green]done[/green]", f"limit={scrape_limit}, fresh={fresh}")
+        )
 
         analyze_cmd = [str(venv_python), "analyze.py"]
         if all_files:
@@ -270,7 +325,13 @@ def auto(
         _show_auto_summary(rows)
         console.print("[bold green]Auto workflow completed.[/bold green]")
     except subprocess.CalledProcessError as exc:
-        rows.append(("Failure", "[red]failed[/red]", f"Exit code {exc.returncode}: {' '.join(exc.cmd)}"))
+        rows.append(
+            (
+                "Failure",
+                "[red]failed[/red]",
+                f"Exit code {exc.returncode}: {' '.join(exc.cmd)}",
+            )
+        )
         _show_auto_summary(rows)
         raise typer.Exit(code=exc.returncode) from exc
     except Exception as exc:  # noqa: BLE001
@@ -280,6 +341,16 @@ def auto(
 
 
 def main() -> None:
+    argv = sys.argv[1:]
+    if argv and argv[0] == "analyze":
+        typo_dash = any(arg == "-llm" for arg in argv[1:])
+        typo_positional = len(argv) >= 2 and argv[1] == "llm"
+        if typo_dash or typo_positional:
+            console.print(
+                "[red]Invalid LLM flag usage.[/red] Use: [bold]stackpulse analyze --llm[/bold]"
+            )
+            sys.exit(2)
+
     app()
 
 
