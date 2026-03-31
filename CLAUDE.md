@@ -9,15 +9,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pip install -r requirements.txt
 playwright install chromium
 
-# One-time login (saves session file from config.py)
+# Optional: install CLI entrypoint
+pip install -e .
+
+# Typer + Rich CLI
+stackpulse --help
+stackpulse setup-session
+stackpulse scrape --limit 3
+stackpulse scrape --fresh
+stackpulse analyze --all --llm
+stackpulse analyze --candidates
+stackpulse auto --limit 3 --all
+
+# One-time login (legacy script entrypoint still supported)
 py setup_session.py
 
-# Scrape jobs
+# Scrape jobs (legacy script entrypoints)
 py scrape.py --limit 3      # test run
 py scrape.py                # full run (all queries in config.py)
 py scrape.py --fresh        # ignore all previous results
 
-# Analyze collected data
+# Analyze collected data (legacy script entrypoints)
 py analyze.py               # today's file
 py analyze.py --all         # merge all data/jobs_*.json files
 py analyze.py --llm         # + LLM extraction via 9router, results cached in skills.db
@@ -30,6 +42,29 @@ py analyze.py --promote 3            # same, threshold = 3 jobs
 py analyze.py --all --promote        # promote first, then analyze with enriched taxonomy
 ```
 
+`stackpulse auto` defaults:
+- creates `.venv` if missing
+- installs dependencies only when missing
+- installs Playwright Chromium only when missing
+- skips session setup if `session.json` exists
+- fails fast on first failed step
+
+Legacy script commands remain valid and are used by the CLI internally.
+
+## CLI architecture
+
+`cli.py` is a thin Typer + Rich wrapper over existing module logic:
+- `setup-session` → `setup_session.main()`
+- `scrape` → `scrape.scrape_all()`
+- `analyze` → same workflow as `analyze.py main()` using existing helper functions
+- `auto` → orchestrates venv/bootstrap/session/scrape/analyze sequence
+
+Prefer reusing script-level functions and keep behavior parity with existing entrypoints.
+
+## Architecture
+
+The library (`linkedin_scraper`) provides two working pieces and one broken piece:
+
 ## Architecture
 
 The library (`linkedin_scraper`) provides two working pieces and one broken piece:
@@ -39,6 +74,8 @@ The library (`linkedin_scraper`) provides two working pieces and one broken piec
 - **`JobScraper`** (library) — **broken**: only waits for `domcontentloaded`, so it reads an empty DOM before React renders. All fields return `null`. Do not use it.
 
 `job_scraper_direct.py` is the drop-in replacement for `JobScraper`. It navigates to the job URL, waits for `<h1>` to appear, clicks description expand buttons, and extracts fields via ordered selector fallback lists. When `<h1>` never appears, it dumps a screenshot and HTML snippet to `OUTPUT_DIR/debug/<job_id>.*`.
+
+`scrape.py` is now intentionally split into small orchestration helpers (`_search_query_urls`, `_scrape_query_urls`, `_log_run_summary`, etc.) to keep `scrape_all()` readable while preserving auto-resume and save-after-each-job semantics.
 
 ## Data flow
 
@@ -70,15 +107,17 @@ config.py (queries + timeouts + paths + LLM settings)
 
 **Incremental save**: `save_jobs()` overwrites the output file after every single job. Safe to `Ctrl+C` at any time.
 
-**Selector fallback pattern**: every extractor in `job_scraper_direct.py` tries a list of CSS selectors from most-specific to least-specific. LinkedIn A/B tests its UI, so specific class names drift. Generic fallbacks keep extraction working when class names change.
+**Selector fallback pattern**: every extractor in `job_scraper_direct.py` tries a list of CSS selectors from most-specific to least-specific. LinkedIn A/B tests its UI, so specific class names drift. Generic fallbacks keep extraction working when class names change. Extraction errors are now logged with selector/button context while still failing soft to the next fallback.
 
 **Salary**: not a structured LinkedIn field. `extract_salary()` in `scrape.py` regex-scans `job_description` text for currency patterns and stores the result in `salary_extracted`.
 
 **Taxonomy term storage**: `taxonomy.term` stores the regex pattern, not the display string. Most terms are plain lowercase (e.g. `github actions`). Special characters must be pre-escaped (e.g. `c\+\+` for C++). `load_taxonomy()` unescapes patterns back to display strings via `re.sub(r"\\(.)", r"\1", term)`.
 
-**LLM → taxonomy pipeline**: `--llm` extracts skills via LLM and caches results in `llm_results`. After each run, `promote_llm_to_candidates()` automatically queues terms seen in ≥ 2 jobs that are absent from the taxonomy. `--promote` moves pending candidates into `taxonomy`, making them available in all future regex-based runs.
+**LLM → taxonomy pipeline**: `--llm` extracts skills via LLM and caches results in `llm_results`. After each run, `promote_llm_to_candidates()` automatically queues terms seen in ≥ 2 jobs that are absent from taxonomy/alias coverage. `--promote` moves pending candidates into `taxonomy`, making them available in all future regex-based runs.
 
-**LLM 429 / rate-limit handling**: `extract_skills_llm()` catches `RateLimitError` and parses the suggested wait time from the error message (supports `"try again in ..."` and `"reset after ..."`). If wait ≤ `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` (default 30s), it sleeps and retries once. For longer waits (daily quota exhaustion), it falls back to `NINEROUTER_FALLBACK_MODEL`.
+**Coverage gap vs queue status**: `--llm` may report many uncovered terms while `--candidates` shows few or zero pending rows. This is expected: uncovered-term counts are broad, while queue rows are filtered by threshold and candidate status (`pending`/`approved`/`rejected`).
+
+**LLM 429 / rate-limit handling**: `extract_skills_llm()` uses `_call_llm_with_retry()` and `_extract_skills_with_models()` to keep retry/fallback logic isolated. It parses suggested wait from the error message (supports `"try again in ..."` and `"reset after ..."`). If wait ≤ `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` (default 30s), it sleeps and retries once. For longer waits (daily quota exhaustion), it falls back to `NINEROUTER_FALLBACK_MODEL`.
 
 **`SKIP_TERMS`**: generic noise terms (`api`, `testing`, `automation`, etc.) that are blacklisted from entering `taxonomy_candidates`.
 

@@ -4,3 +4,5 @@ python-dotenv
 pandas
 openpyxl
 openai
+typer
+rich
