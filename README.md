@@ -8,10 +8,10 @@ Currently scrapes LinkedIn via Playwright, using a custom job-page scraper that 
 
 ## Project layout
 
-```
+```text
 stackpulse/
-├── config.py               # search queries, delays, paths — edit this
-├── setup_session.py        # one-time LinkedIn login → session.json
+├── config.py               # search queries, delays, timeouts, paths, and LLM settings
+├── setup_session.py        # one-time LinkedIn login → session file
 ├── scrape.py               # main scraper loop
 ├── job_scraper_direct.py   # custom Playwright scraper (replaces broken library JobScraper)
 ├── analyze.py              # skill frequency analysis + Excel export
@@ -50,7 +50,7 @@ py setup_session.py
 
 - If credentials are in `.env`, logs in programmatically
 - Otherwise opens a browser window for manual login
-- Saves cookies/storage to `session.json`
+- Saves cookies/storage to `SESSION_FILE` from `config.py` (default `session.json`)
 - Re-run whenever LinkedIn shows you a login page again
 
 ### 2. Scrape jobs
@@ -77,11 +77,11 @@ py analyze.py --all --llm
 
 Prints a skill frequency table to stdout and saves `data/jobs_*_analysis.xlsx` with one column per skill category.
 
-**`--llm` mode** calls `groq/llama-3.3-70b-versatile` through a local [9router](https://github.com/decolua/9router) instance (`localhost:20128`) to extract skills that fall outside the fixed taxonomy. Results are cached permanently in `data/skills.db` — repeat runs are instant with no API calls.
+`--llm` mode calls `NINEROUTER_MODEL` through your local 9router endpoint (`NINEROUTER_BASE_URL`, default `http://localhost:20128/v1`) to extract skills that fall outside the fixed taxonomy. Results are cached in `data/skills.db` — repeat runs are instant with no API calls.
 
 After each `--llm` run, newly discovered terms (seen in ≥ 2 jobs) are automatically queued in `taxonomy_candidates`.
 
-**Rate-limit handling**: on a 429 the scraper parses the suggested wait time from the error message and sleeps+retries automatically if the wait is ≤ 2 minutes. For longer waits (daily quota exhausted) it falls back to `NINEROUTER_FALLBACK_MODEL` in `analyze.py`. Set this to a 9router combo to chain through multiple providers without interruption. Recommended combo order: Cerebras/Llama-3.3-70B → Cerebras/GPT-OSS-120B → Groq/Llama-4-Maverick → Together/Llama-3.3-70B-Turbo → Fireworks/Llama-3.3-70B → Gemini-cli/Gemini-3-Flash → Kiro/Claude-Haiku-4.5.
+**Rate-limit handling (429):** `analyze.py` parses retry wait from the provider error. If wait ≤ `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` (default `30`), it sleeps and retries once. For longer waits (daily quota exhausted), it falls back to `NINEROUTER_FALLBACK_MODEL` if configured.
 
 ### 4. Promote LLM-discovered skills into taxonomy
 
@@ -92,7 +92,9 @@ py analyze.py --promote 3                  # same, threshold = 3 jobs
 py analyze.py --all --promote              # promote first, then analyze with enriched taxonomy
 ```
 
-Once promoted, terms are matched by regex in all future runs — **no `--llm` flag needed**. To reject a term so it never reappears:
+Once promoted, terms are matched by regex in all future runs — **no `--llm` flag needed**.
+
+To reject a term so it never reappears:
 
 ```bash
 sqlite3 data/skills.db "UPDATE taxonomy_candidates SET status='rejected' WHERE canonical='<term>'"
@@ -102,16 +104,70 @@ sqlite3 data/skills.db "UPDATE taxonomy_candidates SET status='rejected' WHERE c
 
 ## Configuration (`config.py`)
 
+### Core scrape settings
+
 | Variable | Default | Description |
 |---|---|---|
 | `SEARCH_QUERIES` | 11 queries | List of `(keywords, location)` tuples |
-| `JOBS_PER_QUERY` | 25 | Max jobs fetched per query (LinkedIn caps ~100) |
-| `DELAY_BETWEEN_JOBS` | 3s | Pause between individual job page scrapes |
-| `DELAY_BETWEEN_QUERIES` | 5s | Pause between search queries |
-| `OUTPUT_DIR` | `data/` | Directory for JSON output and logs |
-| `SESSION_FILE` | `session.json` | Saved browser session |
+| `JOBS_PER_QUERY` | `25` | Max jobs fetched per query |
+| `DELAY_BETWEEN_JOBS` | `3` | Pause (seconds) between individual job page scrapes |
+| `DELAY_BETWEEN_QUERIES` | `5` | Pause (seconds) between search queries |
+| `OUTPUT_DIR` | `"data"` | Directory for JSON output, logs, DB, and debug dumps |
+| `SESSION_FILE` | `"session.json"` | Saved browser session |
 
-Current search targets: Berlin, Hamburg, Munich, Germany (general), Vienna, Amsterdam, Luxembourg, Barcelona, Madrid, London, Remote — all for Senior Python/FastAPI Backend Developer roles.
+### Scraper timeouts / extraction behavior
+
+| Variable | Default | Description |
+|---|---|---|
+| `PAGE_LOAD_TIMEOUT_MS` | `60000` | Timeout for `page.goto(..., wait_until="domcontentloaded")` |
+| `H1_WAIT_TIMEOUT_MS` | `15000` | Timeout waiting for job title `<h1>` |
+| `BUTTON_CLICK_TIMEOUT_MS` | `3000` | Timeout for clicking expand buttons |
+| `POST_CLICK_SETTLE_SECONDS` | `0.5` | Sleep after each expand click |
+| `POST_EXPAND_SETTLE_SECONDS` | `1.0` | Sleep before extraction starts |
+| `DEBUG_HTML_SNIPPET_CHARS` | `8000` | Max HTML chars written to debug file |
+| `DESCRIPTION_MIN_CHARS` | `100` | Minimum length for accepted job description |
+
+### LLM / analysis settings
+
+| Variable | Default | Description |
+|---|---|---|
+| `DB_FILENAME` | `"skills.db"` | SQLite filename inside `OUTPUT_DIR` |
+| `NINEROUTER_BASE_URL` | `"http://localhost:20128/v1"` | OpenAI-compatible 9router endpoint |
+| `NINEROUTER_MODEL` | `"groq/llama-3.3-70b-versatile"` | Primary extraction model |
+| `NINEROUTER_FALLBACK_MODEL` | `"9router-combo"` | Fallback model/combo when primary is quota-limited |
+| `LLM_MAX_INPUT_CHARS` | `6000` | Max characters sent from each posting to LLM |
+| `LLM_MAX_OUTPUT_TOKENS` | `800` | LLM completion token cap |
+| `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` | `30` | Max retry sleep for 429 before fallback |
+| `RETRY_AFTER_BUFFER_SECONDS` | `2` | Safety buffer added to parsed retry-after |
+
+Current search targets: Berlin, Hamburg, Munich, Germany (general), Vienna, Amsterdam, Luxembourg, Barcelona, Madrid, London, Remote — all for senior Python/FastAPI backend roles.
+
+### Recommended minimal config profile
+
+Use these as a practical baseline in `config.py`:
+
+```python
+# Fast local test profile (quick feedback)
+JOBS_PER_QUERY = 3
+DELAY_BETWEEN_JOBS = 1
+DELAY_BETWEEN_QUERIES = 2
+PAGE_LOAD_TIMEOUT_MS = 45_000
+H1_WAIT_TIMEOUT_MS = 12_000
+LLM_RATE_LIMIT_MAX_WAIT_SECONDS = 15
+```
+
+```python
+# Stable full-run profile (fewer limits/blocks)
+JOBS_PER_QUERY = 25
+DELAY_BETWEEN_JOBS = 3
+DELAY_BETWEEN_QUERIES = 5
+PAGE_LOAD_TIMEOUT_MS = 60_000
+H1_WAIT_TIMEOUT_MS = 15_000
+LLM_RATE_LIMIT_MAX_WAIT_SECONDS = 30
+NINEROUTER_FALLBACK_MODEL = "9router-combo"
+```
+
+Tip: use the fast profile for selector/debug iteration, then switch back to the stable profile for production collection runs.
 
 ---
 
@@ -123,16 +179,16 @@ Current search targets: Berlin, Hamburg, Munich, Germany (general), Vienna, Amst
 | `job_title` | Page `<h1>` |
 | `company` | Company link near title |
 | `company_linkedin_url` | Company `/company/` href |
-| `location` | Location span in job card |
+| `location` | Location text in top card |
 | `posted_date` | "X days ago" text |
 | `applicant_count` | "N applicants" text |
-| `job_description` | Full text of the job description section |
+| `job_description` | Full description text |
 | `salary_extracted` | Regex over description (best-effort) |
 | `search_keywords` | Which query found this job |
 | `search_location` | Which location was searched |
 | `scraped_date` | ISO date of the scrape |
 
-> LinkedIn does not expose salary as a structured field. `salary_extracted` is a regex over the description text — it catches ranges like `€70,000–90,000` or `80k–100k EUR` when present.
+> LinkedIn does not expose salary as a structured field. `salary_extracted` is regex-based and best effort.
 
 ---
 
@@ -160,24 +216,28 @@ Current search targets: Berlin, Hamburg, Munich, Germany (general), Vienna, Amst
 | Soft / Process | agile, mentoring, tech lead, staff engineer |
 | Languages (non-technical) | english, german, french, dutch |
 
-**Adding a term without editing code:**
+Add term without code change:
+
 ```bash
 sqlite3 data/skills.db "INSERT OR IGNORE INTO taxonomy(category,term) VALUES('Cloud','hetzner')"
 ```
 
-**Adding a multilingual alias (e.g. German synonym):**
+Add alias (e.g. multilingual synonym):
+
 ```bash
 sqlite3 data/skills.db \
   "INSERT INTO term_aliases(taxonomy_id,alias,canonical,lang,alias_type)
    SELECT id,'Node.js','node\.js','en','variant' FROM taxonomy WHERE term='node\.js'"
 ```
 
-**Querying LLM-discovered skills across all jobs:**
+Top LLM-discovered skills across all jobs:
+
 ```bash
 sqlite3 data/skills.db "SELECT skill, COUNT(DISTINCT url_key) jobs FROM llm_results GROUP BY skill ORDER BY jobs DESC LIMIT 20"
 ```
 
-**Viewing the promotion queue:**
+Promotion queue view:
+
 ```bash
 sqlite3 data/skills.db "SELECT term, taxonomy_category, jobs_count, status FROM taxonomy_candidates ORDER BY jobs_count DESC"
 ```
@@ -186,14 +246,8 @@ sqlite3 data/skills.db "SELECT term, taxonomy_category, jobs_count, status FROM 
 
 ## Known issues & limitations
 
-**LinkedIn SPA timing** — The library's `JobScraper` only waits for `domcontentloaded`, not for React to render. `job_scraper_direct.py` fixes this by waiting for `<h1>` to appear (up to 15s). If a page still returns no content, a screenshot and HTML snippet are saved to `data/debug/<job_id>.*` for inspection.
-
-**No structured salary data** — LinkedIn hides salary behind a paywall / rarely includes it. The regex extraction catches it when it appears in the description text.
-
-**Session expiry** — LinkedIn sessions typically last days to weeks. Re-run `setup_session.py` if you see "Session expired" errors.
-
-**LinkedIn rate limiting** — Defaults: 3s between jobs, 5s between queries. Increase `DELAY_BETWEEN_JOBS` if you see rate-limit errors. The scraper retries once after a 60s pause on `RateLimitError`.
-
-**LLM provider rate limiting (429)** — Groq's free tier caps at 100k tokens/day. `analyze.py` handles this automatically: parses the retry wait from the error, sleeps and retries if ≤ 2 minutes, otherwise falls back to `NINEROUTER_FALLBACK_MODEL`. To avoid interruptions on large batches, set `NINEROUTER_FALLBACK_MODEL = "9router-combo"` in `analyze.py` and configure a multi-provider combo in your 9router dashboard.
-
-**CSS selectors may drift** — LinkedIn A/B tests its UI constantly. If `job_title` or `job_description` goes back to `null`, inspect `data/debug/` screenshots and update the selector lists in `job_scraper_direct.py`.
+- **LinkedIn SPA timing:** library `JobScraper` is unreliable for React-rendered content. `job_scraper_direct.py` waits for `<h1>` and uses selector fallbacks.
+- **No structured salary data:** salary extraction is regex over free text.
+- **Session expiry:** LinkedIn sessions expire; rerun `setup_session.py`.
+- **LinkedIn UI drift:** CSS selectors can break due to A/B tests. If fields become `null`, inspect `data/debug/` snapshots and update selector lists.
+- **LLM quota limits:** long quota windows skip sleep-retry and use fallback model if configured.

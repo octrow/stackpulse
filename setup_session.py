@@ -8,15 +8,20 @@ Usage:
 
 import asyncio
 import os
+
 from dotenv import load_dotenv
+from playwright.async_api import Page
+
+from config import SESSION_FILE
 
 load_dotenv()
 
-EMAIL = os.getenv("LINKEDIN_EMAIL")
-PASSWORD = os.getenv("LINKEDIN_PASSWORD")
+LINKEDIN_EMAIL = os.getenv("LINKEDIN_EMAIL")
+LINKEDIN_PASSWORD = os.getenv("LINKEDIN_PASSWORD")
 
 
-async def main():
+async def main() -> None:
+    """Log in to LinkedIn and persist the browser session."""
     # Import here so missing playwright doesn't break the import at module level
     from linkedin_scraper import BrowserManager
 
@@ -25,11 +30,11 @@ async def main():
     async with BrowserManager(headless=False) as browser:
         page = browser.page
 
-        if EMAIL and PASSWORD:
-            print(f"Logging in as {EMAIL} via credentials...")
+        if LINKEDIN_EMAIL and LINKEDIN_PASSWORD:
+            print(f"Logging in as {LINKEDIN_EMAIL} via credentials...")
             try:
                 from linkedin_scraper import login_with_credentials
-                await login_with_credentials(page, email=EMAIL, password=PASSWORD)
+                await login_with_credentials(page, email=LINKEDIN_EMAIL, password=LINKEDIN_PASSWORD)
                 print("Logged in successfully.")
             except Exception as e:
                 print(f"Credential login failed ({e}), falling back to manual login.")
@@ -38,12 +43,13 @@ async def main():
             print("No credentials in .env — opening login page for manual login.")
             await _manual_login(page)
 
-        print("Saving session to session.json ...")
-        await browser.save_session("session.json")
+        print(f"Saving session to {SESSION_FILE} ...")
+        await browser.save_session(SESSION_FILE)
         print("Done. You can now run: python scrape.py")
 
 
-async def _manual_login(page):
+async def _manual_login(page: Page) -> None:
+    """Navigate to the LinkedIn login page and wait for the user to complete login."""
     await page.goto("https://www.linkedin.com/login")
     print("\nPlease log in manually in the browser window.")
     print("Waiting up to 5 minutes for you to complete login...")

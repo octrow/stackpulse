@@ -29,9 +29,11 @@ from config import (
 )
 from job_scraper_direct import scrape_job
 
+
 # ── Logging setup ─────────────────────────────────────────────────────────────
 
 def setup_logging() -> logging.Logger:
+    """Configure file + stdout logging and silence noisy third-party loggers."""
     log_dir = Path(OUTPUT_DIR)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "scraper.log"
@@ -49,33 +51,36 @@ def setup_logging() -> logging.Logger:
         ],
     )
     # Silence noisy third-party loggers
-    for noisy in ("playwright", "asyncio", "urllib3", "httpx"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
+    for noisy_logger_name in ("playwright", "asyncio", "urllib3", "httpx"):
+        logging.getLogger(noisy_logger_name).setLevel(logging.WARNING)
 
     return logging.getLogger("scraper")
 
 
+# Module-level logger; setup runs on import intentionally (script entry point).
 log = setup_logging()
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def load_all_scraped_urls() -> set[str]:
     """Return every URL collected across all previous JSON files."""
     data_dir = Path(OUTPUT_DIR)
-    seen: set[str] = set()
-    for f in sorted(data_dir.glob("jobs_*.json")):
+    seen_urls: set[str] = set()
+    for json_file in sorted(data_dir.glob("jobs_*.json")):
         try:
-            jobs = json.loads(f.read_text(encoding="utf-8"))
-            for j in jobs:
-                url = j.get("linkedin_url")
+            jobs = json.loads(json_file.read_text(encoding="utf-8"))
+            for job in jobs:
+                url = job.get("linkedin_url")
                 if url:
-                    seen.add(url)
+                    seen_urls.add(url)
         except Exception as e:
-            log.warning(f"Could not read {f}: {e}")
-    return seen
+            log.warning(f"Could not read {json_file}: {e}")
+    return seen_urls
 
 
 def load_today_jobs(output_file: Path) -> list[dict]:
+    """Load today's already-scraped jobs from disk, or return an empty list."""
     if not output_file.exists():
         return []
     try:
@@ -85,7 +90,8 @@ def load_today_jobs(output_file: Path) -> list[dict]:
         return []
 
 
-def save_jobs(jobs: list[dict], output_file: Path):
+def save_jobs(jobs: list[dict], output_file: Path) -> None:
+    """Write jobs list to disk as pretty-printed JSON (overwrites on each call)."""
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text(
         json.dumps(jobs, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -94,6 +100,11 @@ def save_jobs(jobs: list[dict], output_file: Path):
 
 
 def extract_salary(text: str | None) -> str | None:
+    """Regex-scan job description text for salary/compensation patterns.
+
+    Returns the first match as a raw string, or None if nothing found.
+    LinkedIn does not expose salary as a structured field.
+    """
     if not text:
         return None
     patterns = [
@@ -102,18 +113,19 @@ def extract_salary(text: str | None) -> str | None:
         r"(?:salary|compensation|pay)[^\n]{0,60}[\$€£]\s?\d[\d,\.]+",
     ]
     for pattern in patterns:
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            return m.group(0).strip()
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(0).strip()
     return None
 
 
 # ── Main scrape loop ──────────────────────────────────────────────────────────
 
-async def scrape_all(limit_per_query: int, fresh: bool):
+async def scrape_all(limit_per_query: int, fresh: bool) -> None:
+    """Run the full scrape across all configured queries."""
     try:
         from linkedin_scraper import BrowserManager, JobSearchScraper
-        from linkedin_scraper import AuthenticationError, RateLimitError
+        from linkedin_scraper import AuthenticationError
     except ImportError:
         log.error("linkedin-scraper not installed. Run: pip install -r requirements.txt && playwright install chromium")
         sys.exit(1)
@@ -139,8 +151,8 @@ async def scrape_all(limit_per_query: int, fresh: bool):
         )
 
     total_queries = len(SEARCH_QUERIES)
-    session_new = 0
-    session_failed = 0
+    jobs_scraped_count = 0
+    jobs_failed_count = 0
     start_time = datetime.now()
 
     log.info(f"Starting scrape — {total_queries} queries, limit={limit_per_query} each")
@@ -151,8 +163,8 @@ async def scrape_all(limit_per_query: int, fresh: bool):
 
         search_scraper = JobSearchScraper(page)
 
-        for q_idx, (keywords, location) in enumerate(SEARCH_QUERIES, 1):
-            log.info(f"[{q_idx}/{total_queries}] Searching '{keywords}' in '{location}'")
+        for query_index, (keywords, location) in enumerate(SEARCH_QUERIES, 1):
+            log.info(f"[{query_index}/{total_queries}] Searching '{keywords}' in '{location}'")
 
             try:
                 job_urls: list[str] = await search_scraper.search(
@@ -168,12 +180,13 @@ async def scrape_all(limit_per_query: int, fresh: bool):
                 await asyncio.sleep(DELAY_BETWEEN_QUERIES)
                 continue
 
-            new_urls = [u for u in job_urls if u not in seen_urls]
-            log.info(f"  → {len(job_urls)} results, {len(new_urls)} new (skipping {len(job_urls)-len(new_urls)} already scraped)")
+            new_urls = [url for url in job_urls if url not in seen_urls]
+            skipped_count = len(job_urls) - len(new_urls)
+            log.info(f"  → {len(job_urls)} results, {len(new_urls)} new (skipping {skipped_count} already scraped)")
 
-            for j_idx, url in enumerate(new_urls, 1):
+            for job_index, url in enumerate(new_urls, 1):
                 seen_urls.add(url)
-                log.info(f"  [{j_idx}/{len(new_urls)}] Scraping {url}")
+                log.info(f"  [{job_index}/{len(new_urls)}] Scraping {url}")
 
                 try:
                     job_dict = await scrape_job(page, url)
@@ -183,7 +196,7 @@ async def scrape_all(limit_per_query: int, fresh: bool):
                     return
                 except Exception as e:
                     log.warning(f"  Failed: {e}")
-                    session_failed += 1
+                    jobs_failed_count += 1
                     await asyncio.sleep(DELAY_BETWEEN_JOBS)
                     continue
 
@@ -192,15 +205,19 @@ async def scrape_all(limit_per_query: int, fresh: bool):
                 job_dict["search_location"] = location
                 job_dict["scraped_date"] = today
 
-                desc_len = len(job_dict.get("job_description") or "")
-                salary_hint = f" | salary: {job_dict['salary_extracted']}" if job_dict["salary_extracted"] else ""
+                description_length = len(job_dict.get("job_description") or "")
+                salary_hint = (
+                    f" | salary: {job_dict['salary_extracted']}"
+                    if job_dict["salary_extracted"]
+                    else ""
+                )
                 log.info(
                     f"  ✓ {job_dict.get('job_title') or '?'} @ {job_dict.get('company') or '?'} "
-                    f"({job_dict.get('location') or '?'}) | desc={desc_len}ch{salary_hint}"
+                    f"({job_dict.get('location') or '?'}) | desc={description_length}ch{salary_hint}"
                 )
 
                 all_jobs.append(job_dict)
-                session_new += 1
+                jobs_scraped_count += 1
                 save_jobs(all_jobs, output_file)
 
                 await asyncio.sleep(DELAY_BETWEEN_JOBS)
@@ -210,13 +227,14 @@ async def scrape_all(limit_per_query: int, fresh: bool):
     elapsed = datetime.now() - start_time
     log.info(
         f"Done in {elapsed}. "
-        f"New this session: {session_new}, failed: {session_failed}, "
+        f"New this session: {jobs_scraped_count}, failed: {jobs_failed_count}, "
         f"total in today's file: {len(all_jobs)}"
     )
     log.info(f"Output: {output_file.resolve()}")
 
 
-def main():
+def main() -> None:
+    """Parse CLI arguments and launch the async scrape loop."""
     parser = argparse.ArgumentParser(description="StackPulse job scraper")
     parser.add_argument("--limit", type=int, default=JOBS_PER_QUERY, help="Max jobs per search query")
     parser.add_argument("--fresh", action="store_true", help="Re-scrape even already-seen URLs")

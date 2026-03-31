@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pip install -r requirements.txt
 playwright install chromium
 
-# One-time login (saves session.json)
+# One-time login (saves session file from config.py)
 py setup_session.py
 
 # Scrape jobs
@@ -20,7 +20,7 @@ py scrape.py --fresh        # ignore all previous results
 # Analyze collected data
 py analyze.py               # today's file
 py analyze.py --all         # merge all data/jobs_*.json files
-py analyze.py --llm         # + LLM extraction via 9router (localhost:20128), results cached in skills.db
+py analyze.py --llm         # + LLM extraction via 9router, results cached in skills.db
 py analyze.py --all --llm
 
 # LLM → taxonomy promotion pipeline
@@ -38,19 +38,19 @@ The library (`linkedin_scraper`) provides two working pieces and one broken piec
 - **`JobSearchScraper`** — searches LinkedIn and returns a list of job URLs. Works correctly.
 - **`JobScraper`** (library) — **broken**: only waits for `domcontentloaded`, so it reads an empty DOM before React renders. All fields return `null`. Do not use it.
 
-`job_scraper_direct.py` is the drop-in replacement for `JobScraper`. It navigates to the job URL, waits for `<h1>` to appear (up to 15s), clicks "Show more" buttons to expand the description, then extracts fields using ordered lists of CSS selector fallbacks. When `<h1>` never appears (auth wall, redirect, etc.) it dumps a screenshot and HTML snippet to `data/debug/<job_id>.*`.
+`job_scraper_direct.py` is the drop-in replacement for `JobScraper`. It navigates to the job URL, waits for `<h1>` to appear, clicks description expand buttons, and extracts fields via ordered selector fallback lists. When `<h1>` never appears, it dumps a screenshot and HTML snippet to `OUTPUT_DIR/debug/<job_id>.*`.
 
 ## Data flow
 
 ```
-config.py (queries)
+config.py (queries + timeouts + paths + LLM settings)
   → scrape.py               loops over queries, calls JobSearchScraper → list of URLs
   → job_scraper_direct.py   scrapes each URL → dict
   → data/jobs_YYYY-MM-DD.json   incremental save after each job
   → analyze.py              loads JSON(s)
       ├─ regex-matches taxonomy from data/skills.db → stdout report + .xlsx
-      └─ (--llm) calls groq/llama-3.3-70b-versatile via 9router → open skill extraction
-                 on 429: sleeps parsed wait time (≤ MAX_429_WAIT_S=120s) and retries once,
+      └─ (--llm) calls configured model via 9router → open skill extraction
+                 on 429: sleeps parsed wait time (≤ LLM_RATE_LIMIT_MAX_WAIT_SECONDS) and retries once,
                          then falls back to NINEROUTER_FALLBACK_MODEL if configured
                  results stored in data/skills.db (llm_results table), cached per job URL
                  → promote_llm_to_candidates() auto-queues new terms in taxonomy_candidates
@@ -70,7 +70,7 @@ config.py (queries)
 
 **Incremental save**: `save_jobs()` overwrites the output file after every single job. Safe to `Ctrl+C` at any time.
 
-**Selector fallback pattern**: every extractor in `job_scraper_direct.py` tries a list of CSS selectors from most-specific to least-specific. LinkedIn A/B tests its UI, so specific class names drift. The generic fallbacks (`h1`, `span`, `article`) keep extraction working when class names change.
+**Selector fallback pattern**: every extractor in `job_scraper_direct.py` tries a list of CSS selectors from most-specific to least-specific. LinkedIn A/B tests its UI, so specific class names drift. Generic fallbacks keep extraction working when class names change.
 
 **Salary**: not a structured LinkedIn field. `extract_salary()` in `scrape.py` regex-scans `job_description` text for currency patterns and stores the result in `salary_extracted`.
 
@@ -78,19 +78,19 @@ config.py (queries)
 
 **LLM → taxonomy pipeline**: `--llm` extracts skills via LLM and caches results in `llm_results`. After each run, `promote_llm_to_candidates()` automatically queues terms seen in ≥ 2 jobs that are absent from the taxonomy. `--promote` moves pending candidates into `taxonomy`, making them available in all future regex-based runs.
 
-**LLM 429 / rate-limit handling**: `extract_skills_llm()` catches `RateLimitError` and parses the suggested wait time from the error message (handles both `"try again in 18m0s"` and `"reset after 4s"` formats). If wait ≤ `MAX_429_WAIT_S` (120 s), it sleeps and retries once. If the wait is longer (daily quota exhausted), it falls through to `NINEROUTER_FALLBACK_MODEL`. Set that constant to a 9router combo name (e.g. `"9router-combo"`) to enable automatic provider failover. Recommended combo order: Cerebras/Llama-3.3-70B → Cerebras/GPT-OSS-120B → Groq/Llama-4-Maverick → Together/Llama-3.3-70B-Turbo → Fireworks/Llama-3.3-70B → Gemini-cli/Gemini-3-Flash → Kiro/Claude-Haiku-4.5.
+**LLM 429 / rate-limit handling**: `extract_skills_llm()` catches `RateLimitError` and parses the suggested wait time from the error message (supports `"try again in ..."` and `"reset after ..."`). If wait ≤ `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` (default 30s), it sleeps and retries once. For longer waits (daily quota exhaustion), it falls back to `NINEROUTER_FALLBACK_MODEL`.
 
-**`SKIP_TERMS`**: generic noise terms (`api`, `testing`, `automation`, etc.) that are blacklisted from ever entering `taxonomy_candidates`, defined as a set constant at the top of `analyze.py`.
+**`SKIP_TERMS`**: generic noise terms (`api`, `testing`, `automation`, etc.) that are blacklisted from entering `taxonomy_candidates`.
 
 ## Selector debugging
 
-If job fields return `null` again, check `data/debug/`. The page `title` in the debug print tells you what happened:
+If job fields return `null` again, check `data/debug/`. The page title in the debug output tells you what happened:
 - `"LinkedIn"` or `"Sign In | LinkedIn"` → session expired, re-run `setup_session.py`
-- `"Senior ... | LinkedIn"` → page loaded but selectors need updating — inspect the saved HTML and update the selector lists in `job_scraper_direct.py`
+- `"Senior ... | LinkedIn"` → page loaded but selectors need updating — inspect saved HTML and update selector lists in `job_scraper_direct.py`
 
 ## Extending search queries
 
-Edit `SEARCH_QUERIES` in `config.py` — list of `(keywords, location)` tuples. LinkedIn location strings must match what LinkedIn's search autocomplete accepts (e.g. `"Berlin, Germany"` not `"Berlin"`).
+Edit `SEARCH_QUERIES` in `config.py` — list of `(keywords, location)` tuples. LinkedIn location strings must match what LinkedIn search autocomplete accepts (e.g. `"Berlin, Germany"` not `"Berlin"`).
 
 ## Extending skill detection
 

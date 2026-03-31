@@ -29,11 +29,24 @@ import json
 import re
 import sqlite3
 import time
+from argparse import Namespace
 from collections import Counter
 from datetime import date
 from pathlib import Path
 
 import pandas as pd
+
+from config import (
+    OUTPUT_DIR,
+    DB_FILENAME,
+    NINEROUTER_BASE_URL,
+    NINEROUTER_MODEL,
+    NINEROUTER_FALLBACK_MODEL,
+    LLM_RATE_LIMIT_MAX_WAIT_SECONDS,
+    LLM_MAX_INPUT_CHARS,
+    LLM_MAX_OUTPUT_TOKENS,
+    RETRY_AFTER_BUFFER_SECONDS,
+)
 
 # ── Seed taxonomy (used only to initialise the DB on first run) ───────────────
 
@@ -143,14 +156,14 @@ SKIP_TERMS: set[str] = {
 
 # Maps LLM output category names → taxonomy categories (seeded into DB once)
 LLM_CAT_SEED: list[tuple[str, str]] = [
-    ("languages",     "Languages"),
-    ("frameworks",    "Python Frameworks"),
-    ("libraries",     "Python Libraries"),
-    ("databases",     "Databases — Relational"),   # refined per-term by _DB_HINTS
-    ("cloud_services","Cloud"),
-    ("devops",        "IaC & CI/CD"),
-    ("tools",         "Containers & Orchestration"),
-    ("concepts",      "API & Architecture"),
+    ("languages",      "Languages"),
+    ("frameworks",     "Python Frameworks"),
+    ("libraries",      "Python Libraries"),
+    ("databases",      "Databases — Relational"),   # refined per-term by _DB_HINTS
+    ("cloud_services", "Cloud"),
+    ("devops",         "IaC & CI/CD"),
+    ("tools",          "Containers & Orchestration"),
+    ("concepts",       "API & Architecture"),
 ]
 
 # Keyword hints to pick the right DB sub-category when LLM says "databases"
@@ -171,38 +184,55 @@ ALIAS_SEED: list[tuple[str, str, str, str]] = [
     ("python", "python 3", "en", "variant"),
 ]
 
+# ── Display formatting constants ──────────────────────────────────────────────
+
+_REPORT_SKILL_WIDTH = 25
+_REPORT_CATEGORY_WIDTH = 30
+_REPORT_LOCATION_WIDTH = 35
+_REPORT_LLM_CATEGORY_WIDTH = 20
+_REPORT_TOP_SKILLS_COUNT = 30
+_REPORT_TOP_CATEGORIES_COUNT = 8
+_REPORT_TOP_LOCATIONS_COUNT = 15
+_REPORT_TOP_SALARY_COUNT = 20
+_REPORT_TOP_LLM_SKILLS_COUNT = 15
+_REPORT_TOP_MISSING_SKILLS_COUNT = 50
+
+
 # ── SQLite helpers ────────────────────────────────────────────────────────────
 
-DB_FILENAME = "skills.db"
-
-
 def open_db(data_dir: Path) -> sqlite3.Connection:
+    """Open (or create) the SQLite skills database in data_dir."""
     data_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(data_dir / DB_FILENAME)
     conn.row_factory = sqlite3.Row
     return conn
 
 
+def _table_is_empty(conn: sqlite3.Connection, table_name: str) -> bool:
+    """Return True if the given table has no rows."""
+    return conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0] == 0
+
+
 def normalize_term(term: str) -> str:
-    """Lowercase, collapse whitespace, escape regex metacharacters.
+    """Lowercase, collapse whitespace, and regex-escape a term for taxonomy storage.
 
     The returned string is safe to embed in r'\\b' + term + r'\\b' patterns
     and can be stored directly in taxonomy.term or taxonomy_candidates.canonical.
     """
-    t = term.strip().lower()
-    t = re.sub(r"\s+", " ", t)
-    return re.escape(t)
+    normalised = term.strip().lower()
+    normalised = re.sub(r"\s+", " ", normalised)
+    return re.escape(normalised)
 
 
-def resolve_category(llm_cat: str, term: str, cat_map: dict[str, str]) -> str:
+def resolve_category(llm_category: str, term: str, category_map: dict[str, str]) -> str:
     """Map an LLM category + term to the best-matching taxonomy category."""
-    if llm_cat == "databases":
-        t = term.lower()
-        for keywords, taxonomy_cat in _DB_HINTS:
-            if any(kw in t for kw in keywords):
-                return taxonomy_cat
+    if llm_category == "databases":
+        term_lower = term.lower()
+        for keywords, taxonomy_category in _DB_HINTS:
+            if any(keyword in term_lower for keyword in keywords):
+                return taxonomy_category
         return "Databases — Relational"  # fallback for unknown DB terms
-    return cat_map.get(llm_cat, "API & Architecture")
+    return category_map.get(llm_category, "API & Architecture")
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -257,39 +287,36 @@ def init_db(conn: sqlite3.Connection) -> None:
     """)
     conn.commit()
 
-    # Seed taxonomy
-    if conn.execute("SELECT COUNT(*) FROM taxonomy").fetchone()[0] == 0:
-        rows = [
-            (cat, term)
-            for cat, terms in SKILLS_SEED.items()
+    if _table_is_empty(conn, "taxonomy"):
+        seed_rows = [
+            (category, term)
+            for category, terms in SKILLS_SEED.items()
             for term in terms
         ]
         conn.executemany(
-            "INSERT OR IGNORE INTO taxonomy(category, term) VALUES(?, ?)", rows
+            "INSERT OR IGNORE INTO taxonomy(category, term) VALUES(?, ?)", seed_rows
         )
         conn.commit()
-        print(f"  [DB] Seeded taxonomy with {len(rows)} terms.")
+        print(f"  [DB] Seeded taxonomy with {len(seed_rows)} terms.")
 
-    # Seed llm_category_map
-    if conn.execute("SELECT COUNT(*) FROM llm_category_map").fetchone()[0] == 0:
+    if _table_is_empty(conn, "llm_category_map"):
         conn.executemany(
             "INSERT OR IGNORE INTO llm_category_map VALUES (?,?)", LLM_CAT_SEED
         )
         conn.commit()
 
-    # Seed term_aliases
-    if conn.execute("SELECT COUNT(*) FROM term_aliases").fetchone()[0] == 0:
-        for tax_term, alias_text, lang, atype in ALIAS_SEED:
+    if _table_is_empty(conn, "term_aliases"):
+        for tax_term, alias_text, lang, alias_type in ALIAS_SEED:
             row = conn.execute(
                 "SELECT id FROM taxonomy WHERE term=?", (tax_term,)
             ).fetchone()
             if row:
-                canon = normalize_term(alias_text)
+                canonical = normalize_term(alias_text)
                 conn.execute(
                     """INSERT OR IGNORE INTO term_aliases
                        (taxonomy_id, alias, canonical, lang, alias_type)
                        VALUES (?,?,?,?,?)""",
-                    (row["id"], alias_text, canon, lang, atype),
+                    (row["id"], alias_text, canonical, lang, alias_type),
                 )
         conn.commit()
 
@@ -310,7 +337,6 @@ def load_taxonomy(conn: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:
         """Convert a regex-escaped term back to its human-readable display form."""
         return re.sub(r"\\(.)", r"\1", term)
 
-    # Base terms
     for row in conn.execute(
         "SELECT id, category, term FROM taxonomy ORDER BY category, id"
     ):
@@ -332,7 +358,7 @@ def load_taxonomy(conn: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:
 # ── Candidate pipeline ────────────────────────────────────────────────────────
 
 
-def _tax_key(term: str) -> str:
+def _taxonomy_plain_key(term: str) -> str:
     """Plain-text key for taxonomy existence checks.
 
     Undoes regex escaping (e.g. c\\+\\+ → c++) and lowercases, so that
@@ -350,15 +376,15 @@ def promote_llm_to_candidates(conn: sqlite3.Connection, threshold: int = 2) -> i
 
     Returns the number of newly added candidates.
     """
-    cat_map = dict(
+    category_map = dict(
         conn.execute("SELECT llm_category, taxonomy_category FROM llm_category_map").fetchall()
     )
 
     # Taxonomy existence check uses plain-text keys (re.escape undone) so that
     # multi-word terms like "github actions" and C-style terms like c\+\+ are
     # correctly matched against plain LLM output.
-    existing_tax_keys: set[str] = {
-        _tax_key(row["term"])
+    existing_taxonomy_keys: set[str] = {
+        _taxonomy_plain_key(row["term"])
         for row in conn.execute("SELECT term FROM taxonomy")
     }
     # Aliases are already stored as normalize_term() output — compare by canonical
@@ -372,7 +398,7 @@ def promote_llm_to_candidates(conn: sqlite3.Connection, threshold: int = 2) -> i
         for row in conn.execute("SELECT canonical, jobs_count FROM taxonomy_candidates")
     }
 
-    rows = conn.execute("""
+    llm_rows = conn.execute("""
         SELECT skill, category, COUNT(DISTINCT url_key) AS n
         FROM llm_results
         GROUP BY skill, category
@@ -380,55 +406,52 @@ def promote_llm_to_candidates(conn: sqlite3.Connection, threshold: int = 2) -> i
         ORDER BY n DESC
     """, (threshold,)).fetchall()
 
-    added = updated = 0
+    newly_added_count = updated_count = 0
     today = date.today().isoformat()
 
-    for row in rows:
-        skill: str = row["skill"]
-        llm_cat: str = row["category"]
-        count: int = row["n"]
+    for llm_row in llm_rows:
+        skill: str = llm_row["skill"]
+        llm_category: str = llm_row["category"]
+        jobs_count: int = llm_row["n"]
 
         if skill.lower() in SKIP_TERMS:
             continue
-
-        # Check against taxonomy using plain-text comparison
-        if skill.strip().lower() in existing_tax_keys:
+        if skill.strip().lower() in existing_taxonomy_keys:
             continue
 
         canonical = normalize_term(skill)
 
-        # Check against aliases using normalized comparison
         if canonical in existing_alias_canonicals:
             continue
 
-        taxonomy_cat = resolve_category(llm_cat, skill, cat_map)
+        taxonomy_category = resolve_category(llm_category, skill, category_map)
 
         if canonical in existing_candidates:
-            if count > existing_candidates[canonical]:
+            if jobs_count > existing_candidates[canonical]:
                 conn.execute(
                     "UPDATE taxonomy_candidates SET jobs_count=? WHERE canonical=?",
-                    (count, canonical),
+                    (jobs_count, canonical),
                 )
-                updated += 1
+                updated_count += 1
         else:
             conn.execute(
                 """INSERT OR IGNORE INTO taxonomy_candidates
                    (term, canonical, taxonomy_category, llm_category, jobs_count, added_date)
                    VALUES (?,?,?,?,?,?)""",
-                (skill, canonical, taxonomy_cat, llm_cat, count, today),
+                (skill, canonical, taxonomy_category, llm_category, jobs_count, today),
             )
-            added += 1
+            newly_added_count += 1
 
     conn.commit()
 
-    pending = conn.execute(
+    pending_count = conn.execute(
         "SELECT COUNT(*) FROM taxonomy_candidates WHERE status='pending'"
     ).fetchone()[0]
     print(
-        f"  [Candidates] {added} new, {updated} updated "
-        f"(threshold >=\u2009{threshold} jobs) \u2192 {pending} total pending"
+        f"  [Candidates] {newly_added_count} new, {updated_count} updated "
+        f"(threshold >=\u2009{threshold} jobs) \u2192 {pending_count} total pending"
     )
-    return added
+    return newly_added_count
 
 
 def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
@@ -436,7 +459,7 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
 
     Returns the number of terms promoted.
     """
-    rows = conn.execute(
+    candidate_rows = conn.execute(
         """SELECT term, canonical, taxonomy_category, jobs_count
            FROM taxonomy_candidates
            WHERE status='pending' AND jobs_count >= ?
@@ -444,14 +467,14 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
         (min_jobs,),
     ).fetchall()
 
-    if not rows:
+    if not candidate_rows:
         print(f"  [Promote] No pending candidates with jobs_count >= {min_jobs}.")
         return 0
 
-    print(f"\n  [Promote] Adding {len(rows)} terms to taxonomy (threshold >=\u2009{min_jobs} jobs):")
+    print(f"\n  [Promote] Adding {len(candidate_rows)} terms to taxonomy (threshold >=\u2009{min_jobs} jobs):")
     print(f"  {'Term':<28} {'Category':<32} {'Jobs'}")
     print(f"  {'-'*28} {'-'*32} {'-'*4}")
-    for row in rows:
+    for row in candidate_rows:
         print(f"  {row['term']:<28} {row['taxonomy_category']:<32} {row['jobs_count']}")
         conn.execute(
             "INSERT OR IGNORE INTO taxonomy(category, term) VALUES (?,?)",
@@ -463,11 +486,11 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
         )
 
     conn.commit()
-    return len(rows)
+    return len(candidate_rows)
 
 
 def print_candidates(conn: sqlite3.Connection) -> None:
-    """Print the taxonomy_candidates queue."""
+    """Print the taxonomy_candidates queue grouped by status."""
     rows = conn.execute(
         """SELECT term, canonical, taxonomy_category, llm_category, jobs_count, status
            FROM taxonomy_candidates
@@ -480,7 +503,7 @@ def print_candidates(conn: sqlite3.Connection) -> None:
         print("No taxonomy candidates found. Run: py analyze.py --llm")
         return
 
-    status_counts: Counter = Counter(r["status"] for r in rows)
+    status_counts: Counter = Counter(row["status"] for row in rows)
     print(
         f"\nTaxonomy candidates: {len(rows)} total  "
         f"({status_counts.get('pending', 0)} pending, "
@@ -488,30 +511,24 @@ def print_candidates(conn: sqlite3.Connection) -> None:
         f"{status_counts.get('rejected', 0)} rejected)"
     )
 
-    pending = [r for r in rows if r["status"] == "pending"]
-    if pending:
-        print(f"\n  {'Term':<25} {'Category':<30} {'LLM Cat':<15} {'Jobs'}")
-        print(f"  {'-'*25} {'-'*30} {'-'*15} {'-'*4}")
-        for r in pending:
+    pending_rows = [row for row in rows if row["status"] == "pending"]
+    if pending_rows:
+        print(f"\n  {'Term':<25} {'Category':<{_REPORT_CATEGORY_WIDTH}} {'LLM Cat':<15} {'Jobs'}")
+        print(f"  {'-'*25} {'-'*_REPORT_CATEGORY_WIDTH} {'-'*15} {'-'*4}")
+        for row in pending_rows:
             print(
-                f"  {r['term']:<25} {r['taxonomy_category']:<30} "
-                f"{r['llm_category']:<15} {r['jobs_count']}"
+                f"  {row['term']:<25} {row['taxonomy_category']:<{_REPORT_CATEGORY_WIDTH}} "
+                f"{row['llm_category']:<15} {row['jobs_count']}"
             )
 
-    print(f"\nTo promote all pending (>= 2 jobs):   py analyze.py --promote")
-    print(f"To reject a term:  sqlite3 data/skills.db "
-          f"\"UPDATE taxonomy_candidates SET status='rejected' WHERE canonical='<term>'\"")
+    print("\nTo promote all pending (>= 2 jobs):   py analyze.py --promote")
+    print(
+        "To reject a term:  sqlite3 data/skills.db "
+        "\"UPDATE taxonomy_candidates SET status='rejected' WHERE canonical='<term>'\""
+    )
 
 
 # ── LLM extraction ────────────────────────────────────────────────────────────
-
-NINEROUTER_BASE = "http://localhost:20128/v1"
-NINEROUTER_MODEL = "groq/llama-3.3-70b-versatile"
-# Optional fallback model when the primary hits a daily quota (9router combo or another provider).
-# Set to e.g. "gc/gemini-2.5-pro" or a 9router combo name. Leave empty to skip on exhaustion.
-NINEROUTER_FALLBACK_MODEL = "9router-combo"
-# Max seconds to sleep-and-retry on a 429.  Longer waits are skipped (not worth blocking).
-MAX_429_WAIT_S = 30
 
 LLM_PROMPT = """Extract ALL hard technical skills from this job description.
 Return ONLY a JSON object with these keys (use empty lists if none found):
@@ -537,62 +554,68 @@ Job description:
 
 
 def _url_key(url: str) -> str:
+    """Return an MD5 hex digest of the URL for use as a DB cache key."""
     return hashlib.md5(url.encode()).hexdigest()
 
 
 def _llm_cache_get(conn: sqlite3.Connection, url_key: str) -> dict[str, list[str]] | None:
+    """Return cached LLM extraction results for url_key, or None if not cached."""
     rows = conn.execute(
         "SELECT category, skill FROM llm_results WHERE url_key = ?", (url_key,)
     ).fetchall()
     if not rows:
         return None
-    result: dict[str, list[str]] = {}
+    cached_skills: dict[str, list[str]] = {}
     for row in rows:
-        result.setdefault(row["category"], []).append(row["skill"])
-    return result
+        cached_skills.setdefault(row["category"], []).append(row["skill"])
+    return cached_skills
 
 
 def _llm_cache_set(
     conn: sqlite3.Connection, url: str, url_key: str, result: dict[str, list[str]]
 ) -> None:
-    rows = [
-        (url_key, url, cat, skill)
-        for cat, skills in result.items()
+    """Persist LLM extraction results to the DB cache."""
+    cache_rows = [
+        (url_key, url, category, skill)
+        for category, skills in result.items()
         for skill in skills
     ]
     conn.executemany(
         "INSERT OR IGNORE INTO llm_results(url_key, url, category, skill) VALUES(?,?,?,?)",
-        rows,
+        cache_rows,
     )
     conn.commit()
 
 
-def _parse_retry_after(error_msg: str) -> int | None:
+def _parse_retry_after(error_message: str) -> int | None:
     """Parse the suggested wait time (seconds) from a 429 error message.
 
     Handles both:
       "Please try again in 18m0.864s"  (groq TPD exhaustion)
       "reset after 1m 4s"              (per-minute window reset)
-    Returns seconds rounded up, or None if unparseable.
+    Returns seconds rounded up plus RETRY_AFTER_BUFFER_SECONDS, or None if unparseable.
     """
     for pattern in (
         r"try again in (?:(\d+)m\s*)?(\d+(?:\.\d+)?)s",
         r"reset after (?:(\d+)m\s*)?(\d+(?:\.\d+)?)s",
     ):
-        m = re.search(pattern, str(error_msg))
-        if m:
-            minutes = int(m.group(1)) if m.group(1) else 0
-            seconds = float(m.group(2))
-            return int(minutes * 60 + seconds) + 2  # +2 s buffer
+        match = re.search(pattern, str(error_message))
+        if match:
+            minutes = int(match.group(1)) if match.group(1) else 0
+            seconds = float(match.group(2))
+            return int(minutes * 60 + seconds) + RETRY_AFTER_BUFFER_SECONDS
     return None
 
 
 def _llm_call(client, model: str, text: str) -> dict[str, list[str]]:
-    """Single LLM call; raises on error."""
+    """Execute a single LLM extraction call and return parsed JSON.
+
+    Raises on any error — callers handle retries and fallback.
+    """
     response = client.chat.completions.create(
         model=model,
-        messages=[{"role": "user", "content": LLM_PROMPT + text[:6000]}],
-        max_tokens=800,
+        messages=[{"role": "user", "content": LLM_PROMPT + text[:LLM_MAX_INPUT_CHARS]}],
+        max_tokens=LLM_MAX_OUTPUT_TOKENS,
         temperature=0,
     )
     raw = response.choices[0].message.content.strip()
@@ -608,56 +631,58 @@ def extract_skills_llm(
     """Call LLM via 9router to extract skills. Uses DB cache to avoid re-calls.
 
     On 429:
-      - If the suggested wait is ≤ MAX_429_WAIT_S, sleeps and retries once.
-      - If a NINEROUTER_FALLBACK_MODEL is configured, tries that next.
+      - If the suggested wait is ≤ LLM_RATE_LIMIT_MAX_WAIT_SECONDS, sleeps and retries once.
+      - If NINEROUTER_FALLBACK_MODEL is configured, tries that next.
       - Otherwise logs a warning and returns {}.
     """
     from openai import RateLimitError
 
-    key = _url_key(url)
-    cached = _llm_cache_get(conn, key)
+    cache_key = _url_key(url)
+    cached = _llm_cache_get(conn, cache_key)
     if cached is not None:
         return cached
 
-    def _try_call(model: str, attempt_label: str) -> dict[str, list[str]] | None:
+    def _attempt_llm_call(model: str, attempt_label: str) -> dict[str, list[str]] | None:
         try:
             return _llm_call(client, model, text)
-        except RateLimitError as e:
-            wait = _parse_retry_after(str(e))
-            if wait is not None and wait <= MAX_429_WAIT_S:
+        except RateLimitError as rate_limit_error:
+            wait_seconds = _parse_retry_after(str(rate_limit_error))
+            if wait_seconds is not None and wait_seconds <= LLM_RATE_LIMIT_MAX_WAIT_SECONDS:
                 print(
-                    f"  [LLM] 429 on {attempt_label} — sleeping {wait}s then retrying …"
+                    f"  [LLM] 429 on {attempt_label} — sleeping {wait_seconds}s then retrying …"
                 )
                 try:
-                    time.sleep(wait)
+                    time.sleep(wait_seconds)
                 except KeyboardInterrupt:
                     raise
                 try:
                     return _llm_call(client, model, text)
-                except RateLimitError as e2:
-                    print(f"  [LLM] 429 again after retry ({attempt_label}): {e2}")
+                except RateLimitError as retry_error:
+                    print(f"  [LLM] 429 again after retry ({attempt_label}): {retry_error}")
                     return None
             else:
-                wait_str = f"{wait}s" if wait else "unknown"
+                wait_display = f"{wait_seconds}s" if wait_seconds else "unknown"
                 print(
-                    f"  [LLM] 429 on {attempt_label} — wait {wait_str} exceeds limit, "
+                    f"  [LLM] 429 on {attempt_label} — wait {wait_display} exceeds limit, "
                     f"skipping primary"
                 )
                 return None
-        except Exception as e:
-            print(f"  [LLM] Warning: extraction failed for {url[:60]}: {e}")
+        except Exception as error:
+            print(f"  [LLM] Warning: extraction failed for {url[:60]}: {error}")
             return None
 
-    result = _try_call(NINEROUTER_MODEL, NINEROUTER_MODEL)
+    result = _attempt_llm_call(NINEROUTER_MODEL, NINEROUTER_MODEL)
 
     if result is None and NINEROUTER_FALLBACK_MODEL:
         print(f"  [LLM] Trying fallback model: {NINEROUTER_FALLBACK_MODEL}")
-        result = _try_call(NINEROUTER_FALLBACK_MODEL, f"fallback:{NINEROUTER_FALLBACK_MODEL}")
+        result = _attempt_llm_call(
+            NINEROUTER_FALLBACK_MODEL, f"fallback:{NINEROUTER_FALLBACK_MODEL}"
+        )
 
     if result is None:
         return {}
 
-    _llm_cache_set(conn, url, key, result)
+    _llm_cache_set(conn, url, cache_key, result)
     return result
 
 
@@ -674,35 +699,38 @@ def extract_skills(
     duplicates within a category are suppressed.
     """
     text_lower = text.lower()
-    found: dict[str, list[str]] = {}
+    matched_skills: dict[str, list[str]] = {}
     for category, term_pairs in taxonomy.items():
-        seen: set[str] = set()
-        hits: list[str] = []
+        deduplicated_displays: set[str] = set()
+        category_hits: list[str] = []
         for display, pattern in term_pairs:
-            if display not in seen and re.search(r"\b" + pattern + r"\b", text_lower):
-                seen.add(display)
-                hits.append(display)
-        if hits:
-            found[category] = hits
-    return found
+            if display not in deduplicated_displays and re.search(
+                r"\b" + pattern + r"\b", text_lower
+            ):
+                deduplicated_displays.add(display)
+                category_hits.append(display)
+        if category_hits:
+            matched_skills[category] = category_hits
+    return matched_skills
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
 
 def load_jobs(paths: list[Path]) -> list[dict]:
-    jobs = []
-    for p in paths:
-        with open(p) as f:
-            jobs.extend(json.load(f))
-    seen: set[str] = set()
-    unique = []
-    for j in jobs:
-        url = j.get("linkedin_url", "")
-        if url not in seen:
-            seen.add(url)
-            unique.append(j)
-    return unique
+    """Load and deduplicate jobs from one or more JSON files."""
+    all_jobs = []
+    for path in paths:
+        with open(path, encoding="utf-8") as file_handle:
+            all_jobs.extend(json.load(file_handle))
+    seen_urls: set[str] = set()
+    deduplicated_jobs = []
+    for job in all_jobs:
+        url = job.get("linkedin_url", "")
+        if url not in seen_urls:
+            seen_urls.add(url)
+            deduplicated_jobs.append(job)
+    return deduplicated_jobs
 
 
 # ── Analysis ──────────────────────────────────────────────────────────────────
@@ -714,20 +742,21 @@ def analyze(
     llm_client=None,
     conn: sqlite3.Connection | None = None,
 ) -> pd.DataFrame:
-    rows = []
+    """Build a DataFrame with per-job metadata and extracted skills."""
+    job_rows = []
     for job in jobs:
-        desc = job.get("job_description") or ""
+        description = job.get("job_description") or ""
         title = job.get("job_title") or ""
-        combined = f"{title} {desc}"
+        combined_text = f"{title} {description}"
         url = job.get("linkedin_url", "")
 
-        skills_found = extract_skills(combined, taxonomy)
+        skills_found = extract_skills(combined_text, taxonomy)
 
         llm_skills: dict[str, list[str]] = {}
         if llm_client and conn is not None:
-            llm_skills = extract_skills_llm(combined, url, conn, llm_client)
+            llm_skills = extract_skills_llm(combined_text, url, conn, llm_client)
 
-        rows.append({
+        job_rows.append({
             "job_title": job.get("job_title"),
             "company": job.get("company"),
             "location": job.get("location"),
@@ -738,83 +767,132 @@ def analyze(
             "scraped_date": job.get("scraped_date"),
             "applicant_count": job.get("applicant_count"),
             "skills_raw": skills_found,
-            "all_skills_flat": [s for hits in skills_found.values() for s in hits],
+            "all_skills_flat": [skill for hits in skills_found.values() for skill in hits],
             "skills_llm": llm_skills,
         })
 
-    return pd.DataFrame(rows)
+    return pd.DataFrame(job_rows)
 
 
-def print_report(
-    df: pd.DataFrame, taxonomy: dict[str, list[tuple[str, str]]]
-) -> None:
-    print(f"\n{'=' * 60}")
-    print(f"SKILLS ANALYSIS — {len(df)} unique job postings")
-    print(f"{'=' * 60}")
-
+def _print_top_skills(df: pd.DataFrame) -> None:
+    """Print top skill frequencies across all postings."""
     all_skills: Counter = Counter()
     for skills_list in df["all_skills_flat"]:
         all_skills.update(skills_list)
 
-    print("\nTop 30 skills mentioned across all postings:")
-    for skill, count in all_skills.most_common(30):
-        pct = count / len(df) * 100
-        bar = "█" * int(pct / 2)
-        print(f"  {skill:<25} {count:>4} jobs  ({pct:>5.1f}%)  {bar}")
+    print(f"\nTop {_REPORT_TOP_SKILLS_COUNT} skills mentioned across all postings:")
+    for skill, count in all_skills.most_common(_REPORT_TOP_SKILLS_COUNT):
+        percentage = count / len(df) * 100
+        bar = "█" * int(percentage / 2)
+        print(f"  {skill:<{_REPORT_SKILL_WIDTH}} {count:>4} jobs  ({percentage:>5.1f}%)  {bar}")
+
+
+def _print_category_breakdown(
+    df: pd.DataFrame,
+    taxonomy: dict[str, list[tuple[str, str]]],
+) -> None:
+    """Print category-wise top terms based on regex taxonomy matches."""
+    skills_raw_list: list[dict] = df["skills_raw"].tolist()
 
     print("\nBy category:")
     for category in taxonomy:
-        cat_counter: Counter = Counter()
-        for _, row in df.iterrows():
-            raw = row["skills_raw"]
-            if category in raw:
-                cat_counter.update(raw[category])
-        if cat_counter:
-            top = ", ".join(f"{t}({c})" for t, c in cat_counter.most_common(8))
-            print(f"  {category:<30} {top}")
+        category_counter: Counter = Counter()
+        for skills_raw in skills_raw_list:
+            if category in skills_raw:
+                category_counter.update(skills_raw[category])
+        if not category_counter:
+            continue
 
+        top_terms = ", ".join(
+            f"{term}({count})"
+            for term, count in category_counter.most_common(_REPORT_TOP_CATEGORIES_COUNT)
+        )
+        print(f"  {category:<{_REPORT_CATEGORY_WIDTH}} {top_terms}")
+
+
+def _print_top_locations(df: pd.DataFrame) -> None:
+    """Print the most frequent locations in scraped results."""
     print("\nTop locations in results:")
-    for loc, cnt in df["location"].value_counts().head(15).items():
-        print(f"  {loc:<35} {cnt}")
+    for location, count in df["location"].value_counts().head(_REPORT_TOP_LOCATIONS_COUNT).items():
+        print(f"  {location:<{_REPORT_LOCATION_WIDTH}} {count}")
 
-    salary_found = df[df["salary_extracted"].notna()]
-    print(f"\nSalary hints found in {len(salary_found)}/{len(df)} postings:")
-    for _, row in salary_found.head(20).iterrows():
+
+def _print_salary_hints(df: pd.DataFrame) -> None:
+    """Print postings where a salary hint was extracted."""
+    salary_rows = df[df["salary_extracted"].notna()]
+    print(f"\nSalary hints found in {len(salary_rows)}/{len(df)} postings:")
+    for _, row in salary_rows.head(_REPORT_TOP_SALARY_COUNT).iterrows():
         print(f"  {row['job_title'] or 'N/A':<40} {row['salary_extracted']}")
 
-    if "skills_llm" in df.columns and df["skills_llm"].apply(bool).any():
-        print(f"\n{'=' * 60}")
-        print("LLM-EXTRACTED SKILLS (open taxonomy)")
-        print(f"{'=' * 60}")
 
-        llm_agg: dict[str, Counter] = {}
-        for _, row in df.iterrows():
-            llm = row.get("skills_llm") or {}
-            for cat, skills in llm.items():
-                llm_agg.setdefault(cat, Counter()).update(skills)
+def _print_llm_section(
+    df: pd.DataFrame,
+    taxonomy: dict[str, list[tuple[str, str]]],
+) -> None:
+    """Print LLM extraction aggregates and taxonomy coverage gaps."""
+    if "skills_llm" not in df.columns or not df["skills_llm"].apply(bool).any():
+        return
 
-        for cat, counter in sorted(llm_agg.items()):
-            if counter:
-                top = ", ".join(f"{t}({c})" for t, c in counter.most_common(15))
-                print(f"  {cat:<20} {top}")
+    print(f"\n{'=' * 60}")
+    print("LLM-EXTRACTED SKILLS (open taxonomy)")
+    print(f"{'=' * 60}")
 
-        # All canonical display terms currently in taxonomy
-        all_taxonomy_terms = {
-            display.lower()
-            for terms in taxonomy.values()
-            for display, _ in terms
-        }
-        gap: Counter = Counter()
-        for _, row in df.iterrows():
-            for skills in (row.get("skills_llm") or {}).values():
-                for s in skills:
-                    if s.lower() not in all_taxonomy_terms:
-                        gap[s.lower()] += 1
+    llm_skill_aggregates: dict[str, Counter] = {}
+    skills_llm_list: list[dict] = df["skills_llm"].tolist()
+    for llm_skills in skills_llm_list:
+        if not llm_skills:
+            continue
+        for category, skills in llm_skills.items():
+            llm_skill_aggregates.setdefault(category, Counter()).update(skills)
 
-        if gap:
-            print(f"\nSkills found by LLM but MISSING from taxonomy ({len(gap)} terms):")
-            for skill, count in gap.most_common(50):
-                print(f"  {skill:<30} {count} jobs")
+    for category, counter in sorted(llm_skill_aggregates.items()):
+        if not counter:
+            continue
+        top_terms = ", ".join(
+            f"{term}({count})"
+            for term, count in counter.most_common(_REPORT_TOP_LLM_SKILLS_COUNT)
+        )
+        print(f"  {category:<{_REPORT_LLM_CATEGORY_WIDTH}} {top_terms}")
+
+    all_taxonomy_terms = {
+        display.lower()
+        for terms in taxonomy.values()
+        for display, _ in terms
+    }
+    skills_missing_from_taxonomy: Counter = Counter()
+    for llm_skills in skills_llm_list:
+        for skills in (llm_skills or {}).values():
+            for skill in skills:
+                if skill.lower() not in all_taxonomy_terms:
+                    skills_missing_from_taxonomy[skill.lower()] += 1
+
+    if not skills_missing_from_taxonomy:
+        return
+
+    print(
+        f"\nSkills found by LLM but MISSING from taxonomy "
+        f"({len(skills_missing_from_taxonomy)} terms):"
+    )
+    for skill, count in skills_missing_from_taxonomy.most_common(
+        _REPORT_TOP_MISSING_SKILLS_COUNT
+    ):
+        print(f"  {skill:<{_REPORT_SKILL_WIDTH}} {count} jobs")
+
+
+def print_report(
+    df: pd.DataFrame,
+    taxonomy: dict[str, list[tuple[str, str]]],
+) -> None:
+    """Print a human-readable frequency analysis to stdout."""
+    print(f"\n{'=' * 60}")
+    print(f"SKILLS ANALYSIS — {len(df)} unique job postings")
+    print(f"{'=' * 60}")
+
+    _print_top_skills(df)
+    _print_category_breakdown(df, taxonomy)
+    _print_top_locations(df)
+    _print_salary_hints(df)
+    _print_llm_section(df, taxonomy)
 
 
 def save_excel(
@@ -822,8 +900,9 @@ def save_excel(
     output_path: Path,
     taxonomy: dict[str, list[tuple[str, str]]],
 ) -> None:
-    drop_cols = ["skills_raw", "all_skills_flat", "skills_llm"]
-    export_df = df.drop(columns=[c for c in drop_cols if c in df.columns])
+    """Export the analysis DataFrame to Excel with one column per skill category."""
+    internal_columns = ["skills_raw", "all_skills_flat", "skills_llm"]
+    export_df = df.drop(columns=[col for col in internal_columns if col in df.columns])
 
     for category in taxonomy:
         export_df[category] = df["skills_raw"].apply(
@@ -831,20 +910,66 @@ def save_excel(
         )
 
     if "skills_llm" in df.columns and df["skills_llm"].apply(bool).any():
-        llm_cats = sorted({cat for row in df["skills_llm"] if row for cat in row})
-        for cat in llm_cats:
-            export_df[f"llm_{cat}"] = df["skills_llm"].apply(
-                lambda llm, c=cat: ", ".join((llm or {}).get(c, []))
+        llm_categories = sorted({cat for row in df["skills_llm"] if row for cat in row})
+        for category in llm_categories:
+            export_df[f"llm_{category}"] = df["skills_llm"].apply(
+                lambda llm, cat=category: ", ".join((llm or {}).get(cat, []))
             )
 
     export_df.to_excel(output_path, index=False)
     print(f"\nExcel saved → {output_path.resolve()}")
 
 
+# ── Entry point helpers ───────────────────────────────────────────────────────
+
+
+def _resolve_input_paths(args: Namespace, data_dir: Path) -> list[Path] | None:
+    """Determine which JSON file(s) to analyze based on CLI arguments.
+
+    Returns a list of Paths, or None if no files are found and execution should stop.
+    """
+    if args.file:
+        return [Path(args.file)]
+
+    if args.all:
+        paths = sorted(data_dir.glob("jobs_*.json"))
+        if not paths:
+            print("No job files found in data/. Run scrape.py first.")
+            return None
+        return paths
+
+    # Default: today's file, or the latest available
+    today_file = data_dir / f"jobs_{date.today().isoformat()}.json"
+    if today_file.exists():
+        return [today_file]
+
+    all_files = sorted(data_dir.glob("jobs_*.json"))
+    if not all_files:
+        print("No job files found. Run scrape.py first.")
+        return None
+
+    latest_file = all_files[-1]
+    print(f"Today's file not found, using latest: {latest_file}")
+    return [latest_file]
+
+
+def _build_llm_client(base_url: str, model: str):
+    """Initialise and return an OpenAI-compatible client for 9router, or None on failure."""
+    try:
+        from openai import OpenAI
+        client = OpenAI(base_url=base_url, api_key="local")
+        print(f"LLM extraction enabled → {model} via 9router")
+        return client
+    except ImportError:
+        print("openai package not installed. Run: pip install openai")
+        return None
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
 def main() -> None:
+    """Parse CLI arguments and run the requested analysis / promotion workflow."""
     parser = argparse.ArgumentParser(description="Analyze scraped LinkedIn jobs")
     parser.add_argument("--file", type=str, help="Specific JSON file to analyze")
     parser.add_argument("--all", action="store_true", help="Merge all JSON files in data/")
@@ -869,56 +994,38 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    data_dir = Path("data")
+    data_dir = Path(OUTPUT_DIR)
     conn = open_db(data_dir)
     init_db(conn)
 
-    # Standalone: inspect candidates queue
+    # Standalone: inspect candidates queue only
     if args.candidates:
         print_candidates(conn)
         conn.close()
         return
 
-    # Determine whether we need job files
+    # promote-only mode: no job files needed
     promote_only = args.promote is not None and not args.file and not args.all
-
-    paths: list[Path] = []
-    if not promote_only:
-        if args.file:
-            paths = [Path(args.file)]
-        elif args.all:
-            paths = sorted(data_dir.glob("jobs_*.json"))
-            if not paths:
-                print("No job files found in data/. Run scrape.py first.")
-                if args.promote is not None:
-                    apply_candidates(conn, max(args.promote, 1))
-                conn.close()
-                return
-        else:
-            today = date.today().isoformat()
-            default = data_dir / f"jobs_{today}.json"
-            if not default.exists():
-                file_candidates = sorted(data_dir.glob("jobs_*.json"))
-                if not file_candidates:
-                    print("No job files found. Run scrape.py first.")
-                    if args.promote is not None:
-                        apply_candidates(conn, max(args.promote, 1))
-                    conn.close()
-                    return
-                default = file_candidates[-1]
-                print(f"Today's file not found, using latest: {default}")
-            paths = [default]
-
-    # Promote before loading taxonomy so analysis uses enriched terms
-    if args.promote is not None:
-        apply_candidates(conn, max(args.promote, 1))
-
     if promote_only:
+        apply_candidates(conn, max(args.promote, 1))
         conn.close()
         return
 
+    # Resolve which job file(s) to load
+    paths = _resolve_input_paths(args, data_dir)
+    if paths is None:
+        # No files found; still run promote if requested
+        if args.promote is not None:
+            apply_candidates(conn, max(args.promote, 1))
+        conn.close()
+        return
+
+    # Promote before loading taxonomy so analysis uses the enriched term set
+    if args.promote is not None:
+        apply_candidates(conn, max(args.promote, 1))
+
     taxonomy = load_taxonomy(conn)
-    term_count = sum(len(v) for v in taxonomy.values())
+    term_count = sum(len(terms) for terms in taxonomy.values())
     print(f"Taxonomy loaded: {term_count} terms (+ aliases) across {len(taxonomy)} categories")
 
     print(f"Loading from: {[str(p) for p in paths]}")
@@ -931,12 +1038,7 @@ def main() -> None:
 
     llm_client = None
     if args.llm:
-        try:
-            from openai import OpenAI
-            llm_client = OpenAI(base_url=NINEROUTER_BASE, api_key="local")
-            print(f"LLM extraction enabled → {NINEROUTER_MODEL} via 9router")
-        except ImportError:
-            print("openai package not installed. Run: pip install openai")
+        llm_client = _build_llm_client(NINEROUTER_BASE_URL, NINEROUTER_MODEL)
 
     df = analyze(jobs, taxonomy, llm_client=llm_client, conn=conn)
 
@@ -948,8 +1050,8 @@ def main() -> None:
 
     print_report(df, taxonomy)
 
-    stem = paths[0].stem if len(paths) == 1 else "jobs_all"
-    save_excel(df, data_dir / f"{stem}_analysis.xlsx", taxonomy)
+    output_stem = paths[0].stem if len(paths) == 1 else "jobs_all"
+    save_excel(df, data_dir / f"{output_stem}_analysis.xlsx", taxonomy)
 
 
 if __name__ == "__main__":
