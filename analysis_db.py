@@ -286,6 +286,7 @@ _VALID_DB_TABLES: frozenset[str] = frozenset(
         "llm_results",
         "skill_candidates",
         "skill_aliases",
+        "scraped_jobs",
     }
 )
 
@@ -373,6 +374,14 @@ def init_db(conn: sqlite3.Connection) -> None:
             lang         TEXT DEFAULT 'en',
             alias_type   TEXT DEFAULT 'variant',
             UNIQUE(canonical, skill_id)
+        );
+
+        -- Persistent ledger of successfully scraped LinkedIn jobs
+        CREATE TABLE IF NOT EXISTS scraped_jobs (
+            url_key          TEXT PRIMARY KEY,
+            linkedin_url     TEXT NOT NULL,
+            first_scraped_at TEXT NOT NULL,
+            last_scraped_at  TEXT NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON skill_aliases(canonical);
@@ -528,6 +537,35 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
     conn.commit()
     print("  [DB] Migrated to normalized category schema.")
+
+
+def load_scraped_job_keys(conn: sqlite3.Connection) -> set[str]:
+    """Return canonical URL keys for previously scraped jobs."""
+    return {
+        row["url_key"]
+        for row in conn.execute("SELECT url_key FROM scraped_jobs")
+        if row["url_key"]
+    }
+
+
+def upsert_scraped_job_key(
+    conn: sqlite3.Connection,
+    url_key: str,
+    linkedin_url: str,
+    scraped_at: str,
+) -> None:
+    """Insert or update a scraped-job ledger row for the given canonical URL key."""
+    conn.execute(
+        """
+        INSERT INTO scraped_jobs(url_key, linkedin_url, first_scraped_at, last_scraped_at)
+        VALUES(?, ?, ?, ?)
+        ON CONFLICT(url_key) DO UPDATE SET
+            linkedin_url=excluded.linkedin_url,
+            last_scraped_at=excluded.last_scraped_at
+        """,
+        (url_key, linkedin_url, scraped_at, scraped_at),
+    )
+    conn.commit()
 
 
 def load_skills(conn: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:

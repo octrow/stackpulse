@@ -15,11 +15,13 @@ import argparse
 import json
 import logging
 import re
+import sqlite3
 import sys
 from json import JSONDecodeError
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 try:
     from playwright.async_api import Error as PlaywrightError
@@ -35,6 +37,12 @@ from config import (
     SESSION_FILE,
 )
 from job_scraper_direct import scrape_job
+from analysis_db import (
+    open_db,
+    init_db,
+    load_scraped_job_keys,
+    upsert_scraped_job_key,
+)
 
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
@@ -72,17 +80,43 @@ log = setup_logging()
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def load_all_scraped_urls() -> set[str]:
-    """Return every URL collected across all previous JSON files."""
+_LINKEDIN_JOB_ID_RE = re.compile(r"/jobs/view/(\d+)")
+
+
+def canonical_url_key(url: str | None) -> str | None:
+    """Return stable dedupe key for a LinkedIn job URL."""
+    if not url:
+        return None
+
+    stripped = url.strip()
+    if not stripped:
+        return None
+
+    parsed = urlsplit(stripped)
+    path = (parsed.path or "").rstrip("/")
+
+    match = _LINKEDIN_JOB_ID_RE.search(path)
+    if match:
+        return f"li-job:{match.group(1)}"
+
+    host = (parsed.netloc or "").lower()
+    if not host and parsed.path:
+        host = "linkedin.com"
+
+    return f"{host}{path}" if path else host
+
+
+def load_json_scraped_url_keys() -> set[str]:
+    """Return canonical URL keys from all historical jobs_*.json files."""
     data_dir = Path(OUTPUT_DIR)
-    seen_urls: set[str] = set()
+    seen_keys: set[str] = set()
     for json_file in sorted(data_dir.glob("jobs_*.json")):
         try:
             jobs = json.loads(json_file.read_text(encoding="utf-8"))
             for job in jobs:
-                url = job.get("linkedin_url")
-                if url:
-                    seen_urls.add(url)
+                key = canonical_url_key(job.get("linkedin_url"))
+                if key:
+                    seen_keys.add(key)
         except (OSError, JSONDecodeError, TypeError) as error:
             log.warning(
                 "Could not read %s (%s): %s",
@@ -90,7 +124,59 @@ def load_all_scraped_urls() -> set[str]:
                 type(error).__name__,
                 error,
             )
-    return seen_urls
+    return seen_keys
+
+
+def _open_scrape_db() -> sqlite3.Connection:
+    """Open and initialize the shared SQLite DB used for scrape dedupe state."""
+    conn = open_db(Path(OUTPUT_DIR))
+    init_db(conn)
+    return conn
+
+
+def _backfill_scraped_job_keys_if_empty(conn: sqlite3.Connection) -> int:
+    """Backfill scraped_jobs from historical JSON files when table is empty."""
+    row = conn.execute("SELECT COUNT(*) AS cnt FROM scraped_jobs").fetchone()
+    if row and row["cnt"]:
+        return 0
+
+    now_iso = datetime.now().isoformat(timespec="seconds")
+    inserted = 0
+    data_dir = Path(OUTPUT_DIR)
+    for json_file in sorted(data_dir.glob("jobs_*.json")):
+        try:
+            jobs = json.loads(json_file.read_text(encoding="utf-8"))
+            for job in jobs:
+                url = job.get("linkedin_url")
+                key = canonical_url_key(url)
+                if not key or not url:
+                    continue
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO scraped_jobs(
+                        url_key, linkedin_url, first_scraped_at, last_scraped_at
+                    ) VALUES(?, ?, ?, ?)
+                    """,
+                    (key, url, now_iso, now_iso),
+                )
+                inserted += cursor.rowcount
+        except (OSError, JSONDecodeError, TypeError) as error:
+            log.warning(
+                "Could not backfill from %s (%s): %s",
+                json_file,
+                type(error).__name__,
+                error,
+            )
+
+    conn.commit()
+    if inserted:
+        log.info("Backfilled %s scraped job keys from historical JSON files", inserted)
+    return inserted
+
+
+def load_db_scraped_url_keys(conn: sqlite3.Connection) -> set[str]:
+    """Return canonical URL keys persisted in scraped_jobs."""
+    return load_scraped_job_keys(conn)
 
 
 def load_today_jobs(output_file: Path) -> list[dict]:
@@ -162,21 +248,24 @@ def _ensure_session_file() -> None:
 
 
 def _initialise_scrape_state(
-    output_file: Path, fresh: bool
+    output_file: Path, fresh: bool, conn: sqlite3.Connection
 ) -> tuple[set[str], list[dict]]:
-    """Return seen URLs and current output rows for fresh/resume mode."""
+    """Return seen URL keys and current output rows for fresh/resume mode."""
+    all_jobs = load_today_jobs(output_file)
+
     if fresh:
         log.info("--fresh: ignoring all previous results")
-        return set(), []
+        return set(), all_jobs
 
-    seen_urls = load_all_scraped_urls()
-    all_jobs = load_today_jobs(output_file)
+    backfilled = _backfill_scraped_job_keys_if_empty(conn)
+    seen_keys = load_db_scraped_url_keys(conn)
     log.info(
-        "Resume mode: %s URLs already seen across all files, %s jobs in today's file",
-        len(seen_urls),
+        "Resume mode: %s URL keys already seen in DB (%s backfilled), %s jobs in today's file",
+        len(seen_keys),
+        backfilled,
         len(all_jobs),
     )
-    return seen_urls, all_jobs
+    return seen_keys, all_jobs
 
 
 def _enrich_scraped_job(
@@ -238,12 +327,14 @@ async def _search_query_urls(
 async def _scrape_query_urls(
     page: Any,
     new_urls: list[str],
-    seen_urls: set[str],
+    seen_keys: set[str],
     all_jobs: list[dict],
     output_file: Path,
     keywords: str,
     location: str,
     scraped_date: str,
+    conn: sqlite3.Connection,
+    fresh: bool,
     authentication_error_cls: type[Exception],
 ) -> tuple[int, int, bool]:
     """Scrape all URLs for one query and return counts + early-stop signal."""
@@ -251,7 +342,6 @@ async def _scrape_query_urls(
     jobs_failed_count = 0
 
     for job_index, url in enumerate(new_urls, 1):
-        seen_urls.add(url)
         log.info("  [%s/%s] Scraping %s", job_index, len(new_urls), url)
 
         try:
