@@ -5,11 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-playwright install chromium
+# Recommended one-time install (repo launcher)
+./install.sh
 
-# Optional: install CLI entrypoint
+# Optional: packaging-based install
 pip install -e .
 
 # Typer + Rich CLI
@@ -23,6 +22,9 @@ stackpulse analyze --all --title-contains "Backend" --location-contains "Berlin"
 stackpulse analyze --candidates
 stackpulse auto --limit 3 --all
 
+# Troubleshooting PATH (if stackpulse not found)
+export PATH="$HOME/.local/bin:$PATH"
+```
 # One-time login (legacy script entrypoint still supported)
 py setup_session.py
 
@@ -178,7 +180,7 @@ broad `except Exception` is not used.
 **`SKIP_TERMS`**: generic noise terms (`api`, `testing`, `automation`, etc.) that are blacklisted from entering
 `skill_candidates`.
 
-**Public analyze API**: `resolve_input_paths(args, data_dir)` and `build_llm_client(base_url, model)` are public
+**Public analyze API**: `resolve_input_paths(args, data_dir)` and `build_llm_client(base_url, model, api_key)` are public
 functions (no leading underscore). `cli.py` calls them directly via `import analyze as analyzer`. `_VALID_DB_TABLES` is
 an allowlist used by `_table_is_empty()` to guard against raw SQL table-name injection.
 

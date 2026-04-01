@@ -17,11 +17,11 @@ import logging
 import re
 import sqlite3
 import sys
+from dataclasses import dataclass
 from json import JSONDecodeError
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 try:
     from playwright.async_api import Error as PlaywrightError
@@ -37,7 +37,13 @@ from config import (
     SESSION_FILE,
 )
 from job_scraper_direct import scrape_job
-from analysis_db import open_db, init_db, load_scraped_job_keys, upsert_scraped_job_key
+from analysis_db import (
+    canonical_linkedin_job_key,
+    init_db,
+    load_scraped_job_keys,
+    open_db,
+    upsert_scraped_job_key,
+)
 
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
@@ -75,32 +81,6 @@ log = setup_logging()
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-_LINKEDIN_JOB_ID_RE = re.compile(r"/jobs/view/(\d+)")
-
-
-def canonical_url_key(url: str | None) -> str | None:
-    """Return stable dedupe key for a LinkedIn job URL."""
-    if not url:
-        return None
-
-    stripped = url.strip()
-    if not stripped:
-        return None
-
-    parsed = urlsplit(stripped)
-    path = (parsed.path or "").rstrip("/")
-
-    match = _LINKEDIN_JOB_ID_RE.search(path)
-    if match:
-        return f"li-job:{match.group(1)}"
-
-    host = (parsed.netloc or "").lower()
-    if not host and parsed.path:
-        host = "linkedin.com"
-
-    return f"{host}{path}" if path else host
-
-
 def _open_scrape_db() -> sqlite3.Connection:
     """Open and initialize the shared SQLite DB used for scrape dedupe state."""
     conn = open_db(Path(OUTPUT_DIR))
@@ -122,7 +102,7 @@ def _backfill_scraped_job_keys_if_empty(conn: sqlite3.Connection) -> int:
             jobs = json.loads(json_file.read_text(encoding="utf-8"))
             for job in jobs:
                 url = job.get("linkedin_url")
-                key = canonical_url_key(url)
+                key = canonical_linkedin_job_key(url)
                 if not key or not url:
                     continue
                 cursor = conn.execute(
@@ -298,17 +278,22 @@ async def _search_query_urls(
         return [], False
 
 
+@dataclass
+class QueryScrapeContext:
+    page: Any
+    seen_keys: set[str]
+    all_jobs: list[dict]
+    output_file: Path
+    keywords: str
+    location: str
+    scraped_date: str
+    conn: sqlite3.Connection
+    authentication_error_cls: type[Exception]
+
+
 async def _scrape_query_urls(
-    page: Any,
     new_urls: list[str],
-    seen_keys: set[str],
-    all_jobs: list[dict],
-    output_file: Path,
-    keywords: str,
-    location: str,
-    scraped_date: str,
-    conn: sqlite3.Connection,
-    authentication_error_cls: type[Exception],
+    context: QueryScrapeContext,
 ) -> tuple[int, int, bool]:
     """Scrape all URLs for one query and return counts + early-stop signal."""
     jobs_scraped_count = 0
@@ -318,10 +303,10 @@ async def _scrape_query_urls(
         log.info("  [%s/%s] Scraping %s", job_index, len(new_urls), url)
 
         try:
-            job_dict = await scrape_job(page, url)
-        except authentication_error_cls:
+            job_dict = await scrape_job(context.page, url)
+        except context.authentication_error_cls:
             log.error("Session expired mid-scrape — saving and exiting.")
-            save_jobs(all_jobs, output_file)
+            save_jobs(context.all_jobs, context.output_file)
             return jobs_scraped_count, jobs_failed_count, True
         except (PlaywrightError, TimeoutError, OSError, ValueError) as error:
             log.warning(
@@ -331,22 +316,27 @@ async def _scrape_query_urls(
             await asyncio.sleep(DELAY_BETWEEN_JOBS)
             continue
 
-        _enrich_scraped_job(job_dict, keywords, location, scraped_date)
+        _enrich_scraped_job(
+            job_dict,
+            context.keywords,
+            context.location,
+            context.scraped_date,
+        )
         _log_scraped_job(job_dict)
 
-        all_jobs.append(job_dict)
+        context.all_jobs.append(job_dict)
         jobs_scraped_count += 1
-        save_jobs(all_jobs, output_file)
+        save_jobs(context.all_jobs, context.output_file)
 
-        key = canonical_url_key(url)
+        key = canonical_linkedin_job_key(url)
         if key:
             upsert_scraped_job_key(
-                conn,
+                context.conn,
                 key,
                 url,
                 datetime.now().isoformat(timespec="seconds"),
             )
-            seen_keys.add(key)
+            context.seen_keys.add(key)
 
         await asyncio.sleep(DELAY_BETWEEN_JOBS)
 
@@ -437,7 +427,7 @@ async def scrape_all(limit_per_query: int, fresh: bool) -> None:
                     new_urls = [
                         url
                         for url in job_urls
-                        if canonical_url_key(url) not in seen_keys
+                        if canonical_linkedin_job_key(url) not in seen_keys
                     ]
                     skipped_count = len(job_urls) - len(new_urls)
                     log.info(
@@ -447,22 +437,22 @@ async def scrape_all(limit_per_query: int, fresh: bool) -> None:
                         skipped_count,
                     )
 
+                    query_context = QueryScrapeContext(
+                        page=browser.page,
+                        seen_keys=seen_keys,
+                        all_jobs=all_jobs,
+                        output_file=output_file,
+                        keywords=keywords,
+                        location=location,
+                        scraped_date=today,
+                        conn=conn,
+                        authentication_error_cls=authentication_error_cls,
+                    )
                     (
                         query_scraped_count,
                         query_failed_count,
                         should_stop,
-                    ) = await _scrape_query_urls(
-                        browser.page,
-                        new_urls,
-                        seen_keys,
-                        all_jobs,
-                        output_file,
-                        keywords,
-                        location,
-                        today,
-                        conn,
-                        authentication_error_cls,
-                    )
+                    ) = await _scrape_query_urls(new_urls, query_context)
                     jobs_scraped_count += query_scraped_count
                     jobs_failed_count += query_failed_count
                     if should_stop:

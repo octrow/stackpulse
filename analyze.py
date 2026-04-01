@@ -32,7 +32,6 @@ from argparse import Namespace
 from collections import Counter
 from datetime import date
 from pathlib import Path
-from urllib.parse import urlsplit
 import pandas as pd
 
 from config import (
@@ -53,7 +52,13 @@ from analysis_candidates import (
     print_candidates,
     promote_llm_to_candidates,
 )
-from analysis_db import init_db, load_skills, normalize_term, open_db
+from analysis_db import (
+    canonical_linkedin_job_key,
+    init_db,
+    load_skills,
+    normalize_term,
+    open_db,
+)
 from analysis_llm_cache import _llm_cache_get, _llm_cache_set, _url_key
 
 
@@ -67,31 +72,6 @@ _REPORT_TOP_CATEGORIES_COUNT = 8
 _REPORT_TOP_LOCATIONS_COUNT = 15
 _REPORT_TOP_SALARY_COUNT = 20
 _REPORT_TOP_MISSING_SKILLS_COUNT = 50
-
-_LINKEDIN_JOB_ID_RE = re.compile(r"/jobs/view/(\d+)")
-
-
-def _canonical_url_key(url: str | None) -> str | None:
-    """Return stable dedupe key for a LinkedIn job URL."""
-    if not url:
-        return None
-
-    stripped = url.strip()
-    if not stripped:
-        return None
-
-    parsed = urlsplit(stripped)
-    path = (parsed.path or "").rstrip("/")
-
-    match = _LINKEDIN_JOB_ID_RE.search(path)
-    if match:
-        return f"li-job:{match.group(1)}"
-
-    host = (parsed.netloc or "").lower()
-    if not host and parsed.path:
-        host = "linkedin.com"
-
-    return f"{host}{path}" if path else host
 
 
 # ── LLM extraction ────────────────────────────────────────────────────────────
@@ -362,7 +342,7 @@ def load_jobs(paths: list[Path]) -> list[dict]:
     seen_url_keys: set[str] = set()
     deduplicated_jobs = []
     for job in all_jobs:
-        url_key = _canonical_url_key(job.get("linkedin_url"))
+        url_key = canonical_linkedin_job_key(job.get("linkedin_url"))
         if not url_key:
             deduplicated_jobs.append(job)
             continue
@@ -674,6 +654,11 @@ def _print_quality_summary(df: pd.DataFrame) -> None:
     total = len(df)
     no_desc = (~df["has_description"]).sum() if "has_description" in df.columns else 0
     no_skills = (df["all_skills_flat"].apply(len) == 0).sum()
+    if total == 0:
+        print("\nExtraction quality (0 jobs):")
+        print("  Empty description  :    0 (0.0%)")
+        print("  Zero skills found  :    0 (0.0%)")
+        return
     print(f"\nExtraction quality ({total} jobs):")
     print(f"  Empty description  : {no_desc:>4} ({no_desc / total * 100:.1f}%)")
     print(f"  Zero skills found  : {no_skills:>4} ({no_skills / total * 100:.1f}%)")
@@ -804,8 +789,7 @@ def build_llm_client(base_url: str, model: str, api_key: str):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
-def main() -> None:
-    """Parse CLI arguments and run the requested analysis / promotion workflow."""
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Analyze scraped LinkedIn jobs")
     parser.add_argument("--file", type=str, help="Specific JSON file to analyze")
     parser.add_argument(
@@ -830,60 +814,79 @@ def main() -> None:
         action="store_true",
         help="Show pending skill candidates queue (no analysis)",
     )
-    args = parser.parse_args()
+    return parser
 
+
+def _handle_mode_only_paths(args: Namespace, conn: sqlite3.Connection) -> bool:
+    if args.candidates:
+        print_candidates(conn)
+        return True
+
+    if args.promote is not None and not args.file and not args.all:
+        apply_candidates(conn, max(args.promote, 1))
+        return True
+
+    return False
+
+
+def _load_run_context(
+    args: Namespace,
+    conn: sqlite3.Connection,
+    data_dir: Path,
+) -> (
+    tuple[list[Path], dict[str, list[tuple[str, str]]], list[dict], object | None]
+    | None
+):
+    paths = resolve_input_paths(args, data_dir)
+    if paths is None:
+        if args.promote is not None:
+            apply_candidates(conn, max(args.promote, 1))
+        return None
+
+    if args.promote is not None:
+        apply_candidates(conn, max(args.promote, 1))
+
+    skills = load_skills(conn)
+    term_count = sum(len(terms) for terms in skills.values())
+    print(
+        f"Skills loaded: {term_count} terms (+ aliases) across {len(skills)} categories"
+    )
+
+    print(f"Loading from: {[str(p) for p in paths]}")
+    jobs = load_jobs(paths)
+    print(f"Loaded {len(jobs)} unique jobs.")
+    if not jobs:
+        return None
+
+    llm_client = None
+    if args.llm:
+        llm_client = build_llm_client(
+            NINEROUTER_BASE_URL,
+            NINEROUTER_MODEL,
+            NINEROUTER_API_KEY,
+        )
+
+    return paths, skills, jobs, llm_client
+
+
+def main() -> None:
+    """Parse CLI arguments and run the requested analysis / promotion workflow."""
+    args = _build_parser().parse_args()
     data_dir = Path(OUTPUT_DIR)
+
     conn = open_db(data_dir)
     try:
         init_db(conn)
-
-        # Standalone: inspect candidates queue only
-        if args.candidates:
-            print_candidates(conn)
+        if _handle_mode_only_paths(args, conn):
             return
 
-        # promote-only mode: no job files needed
-        promote_only = args.promote is not None and not args.file and not args.all
-        if promote_only:
-            apply_candidates(conn, max(args.promote, 1))
+        run_context = _load_run_context(args, conn, data_dir)
+        if run_context is None:
             return
 
-        # Resolve which job file(s) to load
-        paths = resolve_input_paths(args, data_dir)
-        if paths is None:
-            # No files found; still run promote if requested
-            if args.promote is not None:
-                apply_candidates(conn, max(args.promote, 1))
-            return
-
-        # Promote before loading skills so analysis uses the enriched term set
-        if args.promote is not None:
-            apply_candidates(conn, max(args.promote, 1))
-
-        skills = load_skills(conn)
-        term_count = sum(len(terms) for terms in skills.values())
-        print(
-            f"Skills loaded: {term_count} terms (+ aliases) across {len(skills)} categories"
-        )
-
-        print(f"Loading from: {[str(p) for p in paths]}")
-        jobs = load_jobs(paths)
-        print(f"Loaded {len(jobs)} unique jobs.")
-
-        if not jobs:
-            return
-
-        llm_client = None
-        if args.llm:
-            llm_client = build_llm_client(
-                NINEROUTER_BASE_URL,
-                NINEROUTER_MODEL,
-                NINEROUTER_API_KEY,
-            )
-
+        paths, skills, jobs, llm_client = run_context
         df = analyze(jobs, skills, llm_client=llm_client, conn=conn)
 
-        # After LLM extraction, auto-queue newly discovered terms as candidates
         if args.llm and llm_client:
             promote_llm_to_candidates(conn, threshold=LLM_CANDIDATE_THRESHOLD)
 
@@ -899,7 +902,6 @@ def main() -> None:
         existing_candidate_terms,
         candidate_threshold=LLM_CANDIDATE_THRESHOLD,
     )
-
     output_stem = paths[0].stem if len(paths) == 1 else "jobs_all"
     save_excel(df, data_dir / f"{output_stem}_analysis.xlsx", skills)
 

@@ -17,8 +17,13 @@ stackpulse/
 ├── setup_session.py        # one-time LinkedIn login → session file
 ├── scrape.py               # main scraper orchestrator + per-query/per-job helpers
 ├── job_scraper_direct.py   # custom Playwright scraper (replaces broken library JobScraper)
-├── analyze.py              # skill analysis + LLM retry/fallback helpers + Excel export
+├── analyze.py              # analysis orchestration/reporting + LLM extraction pipeline
+├── analysis_db.py          # DB schema/migrations + shared canonical_linkedin_job_key helper
+├── analysis_candidates.py  # candidate queue and promotion workflows
+├── analysis_llm_cache.py   # LLM cache read/write helpers
 ├── pyproject.toml          # packaging + console script entrypoint
+├── stackpulse              # repo launcher (auto bootstrap + CLI dispatch)
+├── install.sh              # one-time symlink installer to ~/.local/bin/stackpulse
 ├── requirements.txt
 ├── .env                    # LinkedIn credentials (gitignored)
 ├── .env.example
@@ -46,6 +51,7 @@ stackpulse --help
 
 What this does:
 - `install.sh` creates `~/.local/bin/stackpulse` symlink to this repo launcher
+- launcher follows symlinks to resolve the real repo path
 - launcher auto-creates `.venv` on first run
 - launcher auto-installs dependencies when missing
 - launcher auto-installs Playwright Chromium when missing
@@ -273,6 +279,7 @@ sqlite3 data/skills.db "UPDATE skill_candidates SET status='rejected' WHERE term
 | `NINEROUTER_BASE_URL`             | "http://localhost:20128/v1"    | OpenAI-compatible 9router endpoint                 |
 | `NINEROUTER_MODEL`                | "groq/llama-3.3-70b-versatile" | Primary extraction model                           |
 | `NINEROUTER_FALLBACK_MODEL`       | "9router-combo"                | Fallback model/combo when primary is quota-limited |
+| `NINEROUTER_API_KEY`              | "local"                        | API key passed to the OpenAI-compatible 9router client |
 | `LLM_MAX_INPUT_CHARS`             | `8000`                         | Max characters sent from each posting to LLM       |
 | `LLM_MAX_OUTPUT_TOKENS`           | `1000`                         | LLM completion token cap                           |
 | `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` | `30`                           | Max retry sleep for 429 before fallback            |

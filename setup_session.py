@@ -34,10 +34,18 @@ async def main() -> None:
             print(f"Logging in as {LINKEDIN_EMAIL} via credentials...")
             try:
                 from linkedin_scraper import login_with_credentials
-                await login_with_credentials(page, email=LINKEDIN_EMAIL, password=LINKEDIN_PASSWORD)
+
+                await login_with_credentials(
+                    page,
+                    email=LINKEDIN_EMAIL,
+                    password=LINKEDIN_PASSWORD,
+                )
                 print("Logged in successfully.")
-            except Exception as e:
-                print(f"Credential login failed ({e}), falling back to manual login.")
+            except (TimeoutError, RuntimeError, ValueError) as error:
+                print(
+                    "Credential login failed "
+                    f"({type(error).__name__}: {error}), falling back to manual login."
+                )
                 await _manual_login(page)
         else:
             print("No credentials in .env — opening login page for manual login.")
@@ -56,6 +64,7 @@ async def _manual_login(page: Page) -> None:
 
     try:
         from linkedin_scraper import wait_for_manual_login
+
         await wait_for_manual_login(page, timeout=300_000)
     except ImportError:
         # Fallback: wait until the feed URL appears

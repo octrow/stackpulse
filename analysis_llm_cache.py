@@ -4,7 +4,7 @@ import sqlite3
 
 def _url_key(url: str) -> str:
     """Return an MD5 hex digest of the URL for use as a DB cache key."""
-    return hashlib.md5(url.encode()).hexdigest()
+    return hashlib.md5(url.encode("utf-8")).hexdigest()
 
 
 def _llm_cache_get(

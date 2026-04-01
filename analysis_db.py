@@ -1,6 +1,7 @@
 import re
 import sqlite3
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from config import DB_FILENAME
 
@@ -326,6 +327,32 @@ def normalize_term(term: str) -> str:
     """
     normalised = term.strip().lower()
     return re.sub(r"\s+", " ", normalised)
+
+
+_LINKEDIN_JOB_ID_RE = re.compile(r"/jobs/view/(\d+)")
+
+
+def canonical_linkedin_job_key(url: str | None) -> str | None:
+    """Return a stable dedupe key for a LinkedIn job URL."""
+    if not url:
+        return None
+
+    stripped = url.strip()
+    if not stripped:
+        return None
+
+    parsed = urlsplit(stripped)
+    path = (parsed.path or "").rstrip("/")
+
+    match = _LINKEDIN_JOB_ID_RE.search(path)
+    if match:
+        return f"li-job:{match.group(1)}"
+
+    host = (parsed.netloc or "").lower()
+    if not host and parsed.path:
+        host = "linkedin.com"
+
+    return f"{host}{path}" if path else host
 
 
 def init_db(conn: sqlite3.Connection) -> None:
