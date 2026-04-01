@@ -7,20 +7,20 @@ Usage:
     python analyze.py --all                  # merge all JSON files in data/
     python analyze.py --llm                  # also extract skills via LLM (free, via 9router)
     python analyze.py --all --llm
-    python analyze.py --promote              # promote LLM-discovered candidates (≥2 jobs) into taxonomy
+    python analyze.py --promote              # promote LLM-discovered candidates (≥2 jobs) into skills
     python analyze.py --promote 3            # same but threshold = 3 jobs
-    python analyze.py --all --promote        # promote first, then analyze with enriched taxonomy
-    python analyze.py --candidates           # show pending taxonomy candidates queue
+    python analyze.py --all --promote        # promote first, then analyze with enriched skills
+    python analyze.py --candidates           # show pending skill candidates queue
 
-DB: data/skills.db stores taxonomy + LLM results (auto-created on first run).
-To add a term to the taxonomy without touching code:
-    sqlite3 data/skills.db "INSERT OR IGNORE INTO taxonomy(category,term) VALUES('Cloud','hetzner')"
+DB: data/skills.db stores skills catalog + LLM results (auto-created on first run).
+To add a term without touching code:
+    sqlite3 data/skills.db "INSERT OR IGNORE INTO skills(category,term) VALUES('Cloud','hetzner')"
 To reject a candidate so it never gets promoted:
-    sqlite3 data/skills.db "UPDATE taxonomy_candidates SET status='rejected' WHERE canonical='<term>'"
+    sqlite3 data/skills.db "UPDATE skill_candidates SET status='rejected' WHERE term='<term>'"
 To add an alias (e.g. German synonym):
     sqlite3 data/skills.db \\
-      "INSERT INTO term_aliases(taxonomy_id,alias,canonical,lang,alias_type)
-       SELECT id,'Deutsch','deutsch','de','translation' FROM taxonomy WHERE term='german'"
+      "INSERT INTO skill_aliases(skill_id,alias,canonical,lang,alias_type)
+       SELECT id,'Deutsch','deutsch','de','translation' FROM skills WHERE term='german'"
 """
 
 import argparse
@@ -49,7 +49,7 @@ from config import (
     LLM_CANDIDATE_THRESHOLD,
 )
 
-# ── Seed taxonomy (used only to initialise the DB on first run) ───────────────
+# ── Seed skills (used only to initialise the DB on first run) ─────────────────
 
 SKILLS_SEED: dict[str, list[str]] = {
     "Languages": [
@@ -62,7 +62,7 @@ SKILLS_SEED: dict[str, list[str]] = {
         "scala",
         "typescript",
         "javascript",
-        "c\\+\\+",
+        "c++",
         "c#",
         "ruby",
         "php",
@@ -318,7 +318,7 @@ SKILLS_SEED: dict[str, list[str]] = {
 
 # ── Candidate promotion constants ─────────────────────────────────────────────
 
-# Generic terms that should never enter the taxonomy regardless of frequency
+# Generic terms that should never enter the skills catalog regardless of frequency
 SKIP_TERMS: set[str] = {
     "api",
     "testing",
@@ -347,91 +347,50 @@ SKIP_TERMS: set[str] = {
     "autonomous ai agents",
 }
 
-# Maps LLM output category names → taxonomy categories (seeded into DB once)
-LLM_CAT_SEED: list[tuple[str, str]] = [
-    ("languages", "Languages"),
-    ("frameworks", "Python Frameworks"),
-    ("libraries", "Python Libraries"),
-    ("databases", "Databases — Relational"),  # refined per-term by _DB_HINTS
-    ("cloud_services", "Cloud"),
-    ("devops", "IaC & CI/CD"),
-    ("tools", "Containers & Orchestration"),
-    ("concepts", "API & Architecture"),
-]
+# Maps LLM output category names → skills catalog categories (constant, not in DB)
+_LLM_CATEGORY_MAP: dict[str, str] = {
+    "languages": "Languages",
+    "frameworks": "Python Frameworks",
+    "libraries": "Python Libraries",
+    "databases": "Databases — Relational",  # refined per-term by _CATEGORY_HINTS
+    "cloud_services": "Cloud",
+    "devops": "IaC & CI/CD",
+    "tools": "Containers & Orchestration",
+    "concepts": "API & Architecture",
+}
 
-# Keyword hints to pick the right DB sub-category when LLM says "databases"
-_DB_HINTS: list[tuple[set[str], str]] = [
-    (
-        {
-            "postgresql",
-            "postgres",
-            "mysql",
-            "mariadb",
-            "aurora",
-            "sqlite",
-            "cockroach",
-            "tidb",
-            "rds",
-        },
-        "Databases — Relational",
-    ),
-    (
-        {
-            "redis",
-            "mongo",
-            "elastic",
-            "opensearch",
-            "dynamo",
-            "cassandra",
-            "neo4j",
-            "firestore",
-            "couchdb",
-            "nosql",
-        },
-        "Databases — NoSQL / Search",
-    ),
-    (
-        {
-            "bigquery",
-            "snowflake",
-            "redshift",
-            "databricks",
-            "clickhouse",
-            "dbt",
-            "iceberg",
-            "duckdb",
-            "data lake",
-        },
-        "Databases — Analytical",
-    ),
-]
+# Keyword hints to refine ambiguous LLM categories into specific sub-categories
+_CATEGORY_HINTS: dict[str, list[tuple[set[str], str]]] = {
+    "databases": [
+        (
+            {"postgresql", "postgres", "mysql", "mariadb", "aurora", "sqlite",
+             "cockroach", "tidb", "rds"},
+            "Databases — Relational",
+        ),
+        (
+            {"redis", "mongo", "elastic", "opensearch", "dynamo", "cassandra",
+             "neo4j", "firestore", "couchdb", "nosql"},
+            "Databases — NoSQL / Search",
+        ),
+        (
+            {"bigquery", "snowflake", "redshift", "databricks", "clickhouse",
+             "dbt", "iceberg", "duckdb", "data lake"},
+            "Databases — Analytical",
+        ),
+    ],
+    "concepts": [
+        (
+            {"ai", "machine learning", "ml", "deep learning", "neural", "llm",
+             "generative ai", "rag", "nlp", "computer vision", "agentic",
+             "prompt engineering", "fine-tuning", "multi-agent",
+             "large language model"},
+            "AI / ML (mentioned in JD)",
+        ),
+    ],
+}
 
-# Keyword hints to pick the right sub-category when LLM says "concepts"
-_CONCEPT_HINTS: list[tuple[set[str], str]] = [
-    (
-        {
-            "ai",
-            "machine learning",
-            "ml",
-            "deep learning",
-            "neural",
-            "llm",
-            "generative ai",
-            "rag",
-            "nlp",
-            "computer vision",
-            "agentic",
-            "prompt engineering",
-            "fine-tuning",
-            "multi-agent",
-            "large language model",
-        },
-        "AI / ML (mentioned in JD)",
-    ),
-]
-
-# Initial alias seeds: (taxonomy_term, alias_text, language, alias_type)
-# Only seeded when term_aliases table is empty.
+# Initial alias seeds: (skill_term, alias_text, language, alias_type)
+# Only seeded when skill_aliases table is empty.
 # More aliases can be added via SQL (see module docstring).
 ALIAS_SEED: list[tuple[str, str, str, str]] = [
     ("python", "python3", "en", "variant"),
@@ -442,15 +401,14 @@ ALIAS_SEED: list[tuple[str, str, str, str]] = [
 
 _VALID_DB_TABLES: frozenset[str] = frozenset(
     {
-        "taxonomy",
+        "skills",
         "llm_results",
-        "llm_category_map",
-        "taxonomy_candidates",
-        "term_aliases",
+        "skill_candidates",
+        "skill_aliases",
     }
 )
 
-# Fallback taxonomy category names used in resolve_category
+# Fallback category names used in resolve_category
 _DEFAULT_DB_CATEGORY = "Databases — Relational"
 _DEFAULT_LLM_CATEGORY = "API & Architecture"
 
@@ -485,35 +443,31 @@ def _table_is_empty(conn: sqlite3.Connection, table_name: str) -> bool:
 
 
 def normalize_term(term: str) -> str:
-    """Lowercase, collapse whitespace, and regex-escape a term for taxonomy storage.
+    """Lowercase and collapse whitespace. Plain text, no regex escaping.
 
-    The returned string is safe to embed in r'\\b' + term + r'\\b' patterns
-    and can be stored directly in taxonomy.term or taxonomy_candidates.canonical.
+    Stored directly in skills.term and skill_candidates.term.
     """
     normalised = term.strip().lower()
-    normalised = re.sub(r"\s+", " ", normalised)
-    return re.escape(normalised)
+    return re.sub(r"\s+", " ", normalised)
 
 
-def resolve_category(llm_category: str, term: str, category_map: dict[str, str]) -> str:
-    """Map an LLM category + term to the best-matching taxonomy category."""
+def resolve_category(llm_category: str, term: str) -> str:
+    """Map an LLM category + term to the best-matching skills catalog category."""
     term_lower = term.lower()
-    if llm_category == "databases":
-        for keywords, taxonomy_category in _DB_HINTS:
+    hints = _CATEGORY_HINTS.get(llm_category)
+    if hints:
+        for keywords, target_category in hints:
             if any(keyword in term_lower for keyword in keywords):
-                return taxonomy_category
-        return _DEFAULT_DB_CATEGORY
-    if llm_category == "concepts":
-        for keywords, taxonomy_category in _CONCEPT_HINTS:
-            if any(keyword in term_lower for keyword in keywords):
-                return taxonomy_category
-    return category_map.get(llm_category, _DEFAULT_LLM_CATEGORY)
+                return target_category
+        if llm_category == "databases":
+            return _DEFAULT_DB_CATEGORY
+    return _LLM_CATEGORY_MAP.get(llm_category, _DEFAULT_LLM_CATEGORY)
 
 
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create tables; seed taxonomy, llm_category_map, and term_aliases on first run."""
+    """Create tables; seed skills and aliases on first run."""
     conn.executescript("""
-        CREATE TABLE IF NOT EXISTS taxonomy (
+        CREATE TABLE IF NOT EXISTS skills (
             id       INTEGER PRIMARY KEY AUTOINCREMENT,
             category TEXT NOT NULL,
             term     TEXT NOT NULL,
@@ -521,163 +475,133 @@ def init_db(conn: sqlite3.Connection) -> None:
         );
 
         CREATE TABLE IF NOT EXISTS llm_results (
-            url_key  TEXT NOT NULL,
-            url      TEXT NOT NULL,
-            category TEXT NOT NULL,
-            skill    TEXT NOT NULL,
+            url_key    TEXT NOT NULL,
+            url        TEXT NOT NULL,
+            category   TEXT NOT NULL,
+            skill      TEXT NOT NULL,
+            is_matched INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (url_key, category, skill)
         );
 
-        -- Maps LLM output category names → taxonomy categories
-        CREATE TABLE IF NOT EXISTS llm_category_map (
-            llm_category      TEXT PRIMARY KEY,
-            taxonomy_category TEXT NOT NULL
-        );
-
-        -- Review queue: LLM-discovered terms pending taxonomy inclusion
-        CREATE TABLE IF NOT EXISTS taxonomy_candidates (
+        -- Review queue: LLM-discovered terms pending skills inclusion
+        CREATE TABLE IF NOT EXISTS skill_candidates (
             id                INTEGER PRIMARY KEY AUTOINCREMENT,
             term              TEXT NOT NULL,
-            canonical         TEXT NOT NULL,
-            taxonomy_category TEXT NOT NULL,
+            category          TEXT NOT NULL,
             llm_category      TEXT NOT NULL,
             jobs_count        INTEGER DEFAULT 0,
             status            TEXT DEFAULT 'pending',
             added_date        TEXT NOT NULL,
-            UNIQUE(canonical, taxonomy_category)
+            decided_date      TEXT,
+            UNIQUE(term, category)
         );
 
-        -- Aliases and multilingual synonyms for existing taxonomy terms
-        CREATE TABLE IF NOT EXISTS term_aliases (
+        -- Aliases and multilingual synonyms for existing skills
+        CREATE TABLE IF NOT EXISTS skill_aliases (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            taxonomy_id  INTEGER NOT NULL REFERENCES taxonomy(id) ON DELETE CASCADE,
+            skill_id     INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
             alias        TEXT NOT NULL,
             canonical    TEXT NOT NULL,
             lang         TEXT DEFAULT 'en',
             alias_type   TEXT DEFAULT 'variant',
-            UNIQUE(canonical, taxonomy_id)
+            UNIQUE(canonical, skill_id)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON term_aliases(canonical);
+        CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON skill_aliases(canonical);
     """)
     conn.commit()
 
-    if _table_is_empty(conn, "taxonomy"):
+    if _table_is_empty(conn, "skills"):
         seed_rows = [
-            (category, term)
+            (category, normalize_term(term))
             for category, terms in SKILLS_SEED.items()
             for term in terms
         ]
         conn.executemany(
-            "INSERT OR IGNORE INTO taxonomy(category, term) VALUES(?, ?)", seed_rows
+            "INSERT OR IGNORE INTO skills(category, term) VALUES(?, ?)", seed_rows
         )
         conn.commit()
-        print(f"  [DB] Seeded taxonomy with {len(seed_rows)} terms.")
+        print(f"  [DB] Seeded skills with {len(seed_rows)} terms.")
 
-    if _table_is_empty(conn, "llm_category_map"):
-        conn.executemany(
-            "INSERT OR IGNORE INTO llm_category_map VALUES (?,?)", LLM_CAT_SEED
-        )
-        conn.commit()
-
-    if _table_is_empty(conn, "term_aliases"):
-        for tax_term, alias_text, lang, alias_type in ALIAS_SEED:
+    if _table_is_empty(conn, "skill_aliases"):
+        for skill_term, alias_text, lang, alias_type in ALIAS_SEED:
             row = conn.execute(
-                "SELECT id FROM taxonomy WHERE term=?", (tax_term,)
+                "SELECT id FROM skills WHERE term=?", (normalize_term(skill_term),)
             ).fetchone()
             if row:
                 canonical = normalize_term(alias_text)
                 conn.execute(
-                    """INSERT OR IGNORE INTO term_aliases
-                       (taxonomy_id, alias, canonical, lang, alias_type)
+                    """INSERT OR IGNORE INTO skill_aliases
+                       (skill_id, alias, canonical, lang, alias_type)
                        VALUES (?,?,?,?,?)""",
                     (row["id"], alias_text, canonical, lang, alias_type),
                 )
         conn.commit()
 
 
-def load_taxonomy(conn: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:
-    """Load taxonomy from DB including aliases.
+def load_skills(conn: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:
+    """Load skills catalog from DB including aliases.
 
     Returns {category: [(display_term, regex_pattern), ...]}
-    - display_term: human-readable name reported in output (e.g. 'c++')
-    - regex_pattern: string embedded in r'\\b' + pattern + r'\\b' (e.g. 'c\\+\\+')
+    - display_term: plain text name (e.g. 'c++')
+    - regex_pattern: re.escape'd version for word-boundary matching (e.g. 'c\\+\\+')
 
     Aliases are included as extra patterns that map to the canonical display term.
     extract_skills() deduplicates by display so each canonical is counted once.
     """
-    taxonomy: dict[str, list[tuple[str, str]]] = {}
-
-    def _unescape(term: str) -> str:
-        """Convert a regex-escaped term back to its human-readable display form."""
-        return re.sub(r"\\(.)", r"\1", term)
+    skills: dict[str, list[tuple[str, str]]] = {}
 
     for row in conn.execute(
-        "SELECT id, category, term FROM taxonomy ORDER BY category, id"
+        "SELECT id, category, term FROM skills ORDER BY category, id"
     ):
-        display = _unescape(row["term"])
-        taxonomy.setdefault(row["category"], []).append((display, row["term"]))
+        display = row["term"]
+        pattern = re.escape(display)
+        skills.setdefault(row["category"], []).append((display, pattern))
 
     # Aliases — extra regex patterns that resolve to the canonical display term
     for row in conn.execute("""
-        SELECT t.category, t.term AS canonical_term, a.canonical AS alias_pattern
-        FROM term_aliases a
-        JOIN taxonomy t ON a.taxonomy_id = t.id
+        SELECT s.category, s.term AS canonical_term, a.canonical AS alias_plain
+        FROM skill_aliases a
+        JOIN skills s ON a.skill_id = s.id
     """):
-        display = _unescape(row["canonical_term"])
-        taxonomy.setdefault(row["category"], []).append((display, row["alias_pattern"]))
+        display = row["canonical_term"]
+        pattern = re.escape(row["alias_plain"])
+        skills.setdefault(row["category"], []).append((display, pattern))
 
-    return taxonomy
+    return skills
+
+
+# Keep backward-compatible alias
+load_taxonomy = load_skills
 
 
 # ── Candidate pipeline ────────────────────────────────────────────────────────
 
 
-def _taxonomy_plain_key(term: str) -> str:
-    """Plain-text key for taxonomy existence checks.
-
-    Undoes regex escaping (e.g. c\\+\\+ → c++) and lowercases, so that
-    LLM-returned plain strings can be compared against stored regex patterns.
-    """
-    return re.sub(r"\\(.)", r"\1", term).lower().strip()
-
-
 def promote_llm_to_candidates(
     conn: sqlite3.Connection, threshold: int = LLM_CANDIDATE_THRESHOLD
 ) -> int:
-    """Aggregate llm_results and queue new terms in taxonomy_candidates.
+    """Aggregate llm_results and queue new terms in skill_candidates.
 
     Only terms seen in >= threshold distinct jobs are added.
-    Terms already in taxonomy or in candidates (any status) are skipped.
+    Terms already in skills or in candidates (any status) are skipped.
     Existing candidates get their jobs_count updated if it has grown.
 
     Returns the number of newly added candidates.
     """
-    category_map = dict(
-        conn.execute(
-            "SELECT llm_category, taxonomy_category FROM llm_category_map"
-        ).fetchall()
-    )
-
-    # Taxonomy existence check uses plain-text keys (re.escape undone) so that
-    # multi-word terms like "github actions" and C-style terms like c\+\+ are
-    # correctly matched against plain LLM output.
-    existing_taxonomy_keys: set[str] = {
-        _taxonomy_plain_key(row["term"])
-        for row in conn.execute("SELECT term FROM taxonomy")
+    existing_skill_terms: set[str] = {
+        row["term"] for row in conn.execute("SELECT term FROM skills")
     }
-    # Aliases are already stored as normalize_term() output — compare by canonical
-    existing_alias_canonicals: set[str] = {
-        row["canonical"] for row in conn.execute("SELECT canonical FROM term_aliases")
+    existing_alias_terms: set[str] = {
+        row["canonical"] for row in conn.execute("SELECT canonical FROM skill_aliases")
     }
+    known_terms = existing_skill_terms | existing_alias_terms
 
-    known_taxonomy_terms = existing_taxonomy_keys | existing_alias_canonicals
-
-    # Existing candidates keyed by (canonical, taxonomy_category) → current jobs_count
+    # Existing candidates keyed by (term, category) → current jobs_count
     existing_candidates: dict[tuple[str, str], int] = {
-        (row["canonical"], row["taxonomy_category"]): row["jobs_count"]
+        (row["term"], row["category"]): row["jobs_count"]
         for row in conn.execute(
-            "SELECT canonical, taxonomy_category, jobs_count FROM taxonomy_candidates"
+            "SELECT term, category, jobs_count FROM skill_candidates"
         )
     }
 
@@ -685,12 +609,12 @@ def promote_llm_to_candidates(
         """
         SELECT skill, category, COUNT(DISTINCT url_key) AS n
         FROM llm_results
-        WHERE category != ?
+        WHERE is_matched = 0
         GROUP BY skill, category
         HAVING n >= ?
         ORDER BY n DESC
     """,
-        (_MATCHED_CATEGORY, threshold),
+        (threshold,),
     ).fetchall()
 
     newly_added_count = updated_count = 0
@@ -701,31 +625,30 @@ def promote_llm_to_candidates(
         llm_category: str = llm_row["category"]
         jobs_count: int = llm_row["n"]
 
-        if skill.lower() in SKIP_TERMS:
+        normalized = normalize_term(skill)
+
+        if normalized in SKIP_TERMS:
             continue
 
-        canonical = normalize_term(skill)
-        taxonomy_key = _taxonomy_plain_key(skill)
-
-        if canonical in known_taxonomy_terms or taxonomy_key in known_taxonomy_terms:
+        if normalized in known_terms:
             continue
 
-        taxonomy_category = resolve_category(llm_category, skill, category_map)
-        candidate_key = (canonical, taxonomy_category)
+        target_category = resolve_category(llm_category, skill)
+        candidate_key = (normalized, target_category)
 
         if candidate_key in existing_candidates:
             if jobs_count > existing_candidates[candidate_key]:
                 conn.execute(
-                    "UPDATE taxonomy_candidates SET jobs_count=? WHERE canonical=? AND taxonomy_category=?",
-                    (jobs_count, canonical, taxonomy_category),
+                    "UPDATE skill_candidates SET jobs_count=? WHERE term=? AND category=?",
+                    (jobs_count, normalized, target_category),
                 )
                 updated_count += 1
         else:
             conn.execute(
-                """INSERT OR IGNORE INTO taxonomy_candidates
-                   (term, canonical, taxonomy_category, llm_category, jobs_count, added_date)
-                   VALUES (?,?,?,?,?,?)""",
-                (skill, canonical, taxonomy_category, llm_category, jobs_count, today),
+                """INSERT OR IGNORE INTO skill_candidates
+                   (term, category, llm_category, jobs_count, added_date)
+                   VALUES (?,?,?,?,?)""",
+                (normalized, target_category, llm_category, jobs_count, today),
             )
             newly_added_count += 1
             existing_candidates[candidate_key] = jobs_count
@@ -733,7 +656,7 @@ def promote_llm_to_candidates(
     conn.commit()
 
     pending_count = conn.execute(
-        "SELECT COUNT(*) FROM taxonomy_candidates WHERE status='pending'"
+        "SELECT COUNT(*) FROM skill_candidates WHERE status='pending'"
     ).fetchone()[0]
     print(
         f"  [Candidates queue] {newly_added_count} new, {updated_count} updated "
@@ -743,13 +666,13 @@ def promote_llm_to_candidates(
 
 
 def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
-    """Promote pending candidates with jobs_count >= min_jobs into taxonomy.
+    """Promote pending candidates with jobs_count >= min_jobs into skills catalog.
 
     Returns the number of terms promoted.
     """
     candidate_rows = conn.execute(
-        """SELECT term, canonical, taxonomy_category, jobs_count
-           FROM taxonomy_candidates
+        """SELECT term, category, jobs_count
+           FROM skill_candidates
            WHERE status='pending' AND jobs_count >= ?
            ORDER BY jobs_count DESC""",
         (min_jobs,),
@@ -760,21 +683,22 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
         return 0
 
     print(
-        f"\n  [Promote] Adding {len(candidate_rows)} terms to taxonomy (threshold >=\u2009{min_jobs} jobs):"
+        f"\n  [Promote] Adding {len(candidate_rows)} terms to skills (threshold >=\u2009{min_jobs} jobs):"
     )
     print(f"  {'Term':<28} {'Category':<32} {'Jobs'}")
     print(f"  {'-' * 28} {'-' * 32} {'-' * 4}")
+    today = date.today().isoformat()
     for row in candidate_rows:
-        print(f"  {row['term']:<28} {row['taxonomy_category']:<32} {row['jobs_count']}")
+        print(f"  {row['term']:<28} {row['category']:<32} {row['jobs_count']}")
         conn.execute(
-            "INSERT OR IGNORE INTO taxonomy(category, term) VALUES (?,?)",
-            (row["taxonomy_category"], row["canonical"]),
+            "INSERT OR IGNORE INTO skills(category, term) VALUES (?,?)",
+            (row["category"], row["term"]),
         )
         conn.execute(
-            """UPDATE taxonomy_candidates
-               SET status='approved'
-               WHERE canonical=? AND taxonomy_category=?""",
-            (row["canonical"], row["taxonomy_category"]),
+            """UPDATE skill_candidates
+               SET status='approved', decided_date=?
+               WHERE term=? AND category=?""",
+            (today, row["term"], row["category"]),
         )
 
     conn.commit()
@@ -782,28 +706,28 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
 
 
 def print_candidates(conn: sqlite3.Connection) -> None:
-    """Print the taxonomy_candidates queue grouped by status."""
+    """Print the skill_candidates queue grouped by status."""
     rows = conn.execute(
-        """SELECT term, canonical, taxonomy_category, llm_category, jobs_count, status
-           FROM taxonomy_candidates
+        """SELECT term, category, llm_category, jobs_count, status
+           FROM skill_candidates
            ORDER BY
                CASE status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END,
                jobs_count DESC"""
     ).fetchall()
 
     if not rows:
-        print("No taxonomy candidates found. Run: py analyze.py --llm")
+        print("No skill candidates found. Run: py analyze.py --llm")
         return
 
     status_counts: Counter = Counter(row["status"] for row in rows)
     print(
-        f"\nTaxonomy candidates (all statuses): {len(rows)} total  "
+        f"\nSkill candidates (all statuses): {len(rows)} total  "
         f"({status_counts.get('pending', 0)} pending, "
         f"{status_counts.get('approved', 0)} approved, "
         f"{status_counts.get('rejected', 0)} rejected)"
     )
     print(
-        "  Note: this queue summary is separate from taxonomy/alias coverage gaps shown in --llm output."
+        "  Note: this queue summary is separate from skills/alias coverage gaps shown in --llm output."
     )
 
     pending_rows = [row for row in rows if row["status"] == "pending"]
@@ -814,48 +738,45 @@ def print_candidates(conn: sqlite3.Connection) -> None:
         print(f"  {'-' * 25} {'-' * _REPORT_CATEGORY_WIDTH} {'-' * 15} {'-' * 4}")
         for row in pending_rows:
             print(
-                f"  {row['term']:<25} {row['taxonomy_category']:<{_REPORT_CATEGORY_WIDTH}} "
+                f"  {row['term']:<25} {row['category']:<{_REPORT_CATEGORY_WIDTH}} "
                 f"{row['llm_category']:<15} {row['jobs_count']}"
             )
 
     print("\nTo promote all pending (>= 2 jobs):   py analyze.py --promote")
     print(
         "To reject a term:  sqlite3 data/skills.db "
-        "\"UPDATE taxonomy_candidates SET status='rejected' WHERE canonical='<term>'\""
+        "\"UPDATE skill_candidates SET status='rejected' WHERE term='<term>'\""
     )
 
 
 # ── LLM extraction ────────────────────────────────────────────────────────────
 
-_MATCHED_CATEGORY = "_matched"
-"""Synthetic category key used in llm_results for taxonomy-matched terms."""
 
+def _build_llm_prompt(skills: dict[str, list[tuple[str, str]]]) -> str:
+    """Build a skills-aware LLM prompt.
 
-def _build_llm_prompt(taxonomy: dict[str, list[tuple[str, str]]]) -> str:
-    """Build a taxonomy-aware LLM prompt.
-
-    Serializes existing taxonomy terms grouped by category so the LLM can match
+    Serializes existing skill terms grouped by category so the LLM can match
     against known terms and only flag genuinely new discoveries.
     """
     # Deduplicate display terms per category (aliases share the same display)
     lines = []
     categories_list = []
-    for category, term_pairs in taxonomy.items():
+    for category, term_pairs in skills.items():
         unique_terms = sorted({display for display, _ in term_pairs})
         lines.append(f"  {category}: {', '.join(unique_terms)}")
         categories_list.append(category)
 
-    taxonomy_block = "\n".join(lines)
+    skills_block = "\n".join(lines)
     categories_block = ", ".join(f'"{c}"' for c in categories_list)
 
-    return f"""You are a skill extraction assistant. Below is a taxonomy of known technical skills grouped by category.
+    return f"""You are a skill extraction assistant. Below is a catalog of known technical skills grouped by category.
 
-TAXONOMY:
-{taxonomy_block}
+KNOWN SKILLS:
+{skills_block}
 
 TASK: Analyze the job description and:
-1. List ALL taxonomy terms that are mentioned or clearly implied. Use the EXACT term from the taxonomy — do not paraphrase.
-2. List any genuinely NEW technical skills/tools/protocols NOT in the taxonomy. For each, suggest the best-fit category from: {categories_block}.
+1. List ALL known skill terms that are mentioned or clearly implied. Use the EXACT term from the catalog — do not paraphrase.
+2. List any genuinely NEW technical skills/tools/protocols NOT in the catalog. For each, suggest the best-fit category from: {categories_block}.
 
 Return ONLY JSON:
 {{
@@ -864,7 +785,7 @@ Return ONLY JSON:
 }}
 
 Rules:
-- "matched" must contain ONLY exact terms from the taxonomy above, lowercase
+- "matched" must contain ONLY exact terms from the catalog above, lowercase
 - "new_terms": only include specific, concrete technologies, tools, libraries, or protocols — NOT generic concepts like "debugging", "scalability", "containerization", "restful apis", "ci/cd pipelines", "async programming", "design patterns"
 - Do NOT include soft skills or company names
 - Return ONLY the JSON, no explanation
@@ -881,29 +802,53 @@ def _url_key(url: str) -> str:
 def _llm_cache_get(
     conn: sqlite3.Connection, url_key: str
 ) -> dict[str, list[str]] | None:
-    """Return cached LLM extraction results for url_key, or None if not cached."""
+    """Return cached LLM extraction results for url_key, or None if not cached.
+
+    Returns {category: [skills]} with a special '_matched' key for is_matched=1 rows
+    to maintain internal API compatibility with _build_comprehensive_by_category.
+    """
     rows = conn.execute(
-        "SELECT category, skill FROM llm_results WHERE url_key = ?", (url_key,)
+        "SELECT category, skill, is_matched FROM llm_results WHERE url_key = ?",
+        (url_key,),
     ).fetchall()
     if not rows:
         return None
     cached_skills: dict[str, list[str]] = {}
     for row in rows:
-        cached_skills.setdefault(row["category"], []).append(row["skill"])
+        if row["is_matched"]:
+            cached_skills.setdefault("_matched", []).append(row["skill"])
+        else:
+            cached_skills.setdefault(row["category"], []).append(row["skill"])
     return cached_skills
 
 
 def _llm_cache_set(
-    conn: sqlite3.Connection, url: str, url_key: str, result: dict[str, list[str]]
+    conn: sqlite3.Connection,
+    url: str,
+    url_key: str,
+    result: dict[str, list[str]],
 ) -> None:
-    """Persist LLM extraction results to the DB cache."""
-    cache_rows = [
-        (url_key, url, category, skill)
-        for category, skills in result.items()
-        for skill in skills
-    ]
+    """Persist LLM extraction results to the DB cache.
+
+    Entries under '_matched' key are stored with is_matched=1 and their actual
+    skills-catalog category looked up from the skills table.
+    """
+    cache_rows: list[tuple] = []
+    for category, skills in result.items():
+        is_matched = 1 if category == "_matched" else 0
+        for skill in skills:
+            if is_matched:
+                # Look up the actual category from the skills table
+                row = conn.execute(
+                    "SELECT category FROM skills WHERE term = ?",
+                    (skill.lower(),),
+                ).fetchone()
+                actual_cat = row["category"] if row else "Unknown"
+                cache_rows.append((url_key, url, actual_cat, skill, 1))
+            else:
+                cache_rows.append((url_key, url, category, skill, 0))
     conn.executemany(
-        "INSERT OR IGNORE INTO llm_results(url_key, url, category, skill) VALUES(?,?,?,?)",
+        "INSERT OR IGNORE INTO llm_results(url_key, url, category, skill, is_matched) VALUES(?,?,?,?,?)",
         cache_rows,
     )
     conn.commit()
@@ -1019,34 +964,35 @@ def _extract_skills_with_models(
 
 
 def _normalize_llm_result(
-    raw_result: dict, taxonomy: dict[str, list[tuple[str, str]]]
+    raw_result: dict, skills: dict[str, list[tuple[str, str]]]
 ) -> dict[str, list[str]]:
-    """Convert new-format LLM output to the cache-storable format.
+    """Convert LLM output to internal cache format.
 
-    New format from LLM: {"matched": ["python", ...], "new_terms": [{"term": "x", "category": "Y"}, ...]}
-    Cache format: {"_matched": ["python", ...], "Category Name": ["new_term", ...]}
+    LLM returns: {"matched": ["python", ...], "new_terms": [{"term": "x", "category": "Y"}, ...]}
+    Internal: {"_matched": ["python", ...], "Category Name": ["new_term", ...]}
 
-    Falls through for old-format results (already keyed by LLM category).
+    The "_matched" key is an internal marker — _llm_cache_set translates it to
+    is_matched=1 with the actual skills category when writing to DB.
     """
     if "matched" not in raw_result and "new_terms" not in raw_result:
-        # Old-format LLM result — return as-is for backward compat
+        # Old-format LLM result — treat all as new discoveries
         return raw_result
 
-    # Build set of valid taxonomy display terms for validation
-    valid_terms = {display for terms in taxonomy.values() for display, _ in terms}
+    # Build set of valid skill display terms for validation
+    valid_terms = {display for terms in skills.values() for display, _ in terms}
 
     normalized: dict[str, list[str]] = {}
 
-    # Matched terms — validate against taxonomy, store under _MATCHED_CATEGORY
+    # Matched terms — validate against known skills
     matched = raw_result.get("matched", [])
     if matched:
         validated = [
             t for t in matched if isinstance(t, str) and t.lower() in valid_terms
         ]
         if validated:
-            normalized[_MATCHED_CATEGORY] = validated
+            normalized["_matched"] = validated
 
-    # New terms — store under their suggested taxonomy category
+    # New terms — store under their suggested category
     new_terms = raw_result.get("new_terms", [])
     for entry in new_terms:
         if not isinstance(entry, dict):
@@ -1083,7 +1029,7 @@ def extract_skills_llm(
     if result is None:
         return {}
 
-    # Normalize new-format LLM output before caching
+    # Normalize LLM output before caching
     if taxonomy is not None:
         result = _normalize_llm_result(result, taxonomy)
 
@@ -1144,50 +1090,37 @@ def load_jobs(paths: list[Path]) -> list[dict]:
 def _build_comprehensive_by_category(
     skills_found: dict[str, list[str]],
     llm_skills: dict[str, list[str]],
-    taxonomy: dict[str, list[tuple[str, str]]],
-    category_map: dict[str, str],
+    skills_catalog: dict[str, list[tuple[str, str]]],
 ) -> dict[str, list[str]]:
-    """Merge regex taxonomy hits with LLM skills into unified per-category dict.
+    """Merge regex hits with LLM skills into unified per-category dict.
 
-    New-format LLM results (with ``_matched`` key) use a reverse taxonomy lookup.
-    Old-format results fall back to ``resolve_category``.
+    Matched LLM terms (under '_matched' key) are routed to their catalog category
+    via reverse lookup. New discoveries are stored under their LLM-suggested category.
     """
     merged: dict[str, list[str]] = {
         cat: list(hits) for cat, hits in skills_found.items()
     }
 
-    if _MATCHED_CATEGORY in llm_skills:
-        # New format — build reverse index: display_term -> category
-        term_to_cat: dict[str, str] = {}
-        for cat, term_pairs in taxonomy.items():
-            for display, _ in term_pairs:
-                term_to_cat.setdefault(display, cat)
+    if not llm_skills:
+        return merged
 
-        # Merge matched taxonomy terms
-        for skill in llm_skills[_MATCHED_CATEGORY]:
-            target_cat = term_to_cat.get(skill.lower())
-            if target_cat is None:
-                continue
+    # Build reverse index: display_term -> category
+    term_to_cat: dict[str, str] = {}
+    for cat, term_pairs in skills_catalog.items():
+        for display, _ in term_pairs:
+            term_to_cat.setdefault(display, cat)
+
+    for llm_cat, skills in llm_skills.items():
+        for skill in skills:
+            if llm_cat == "_matched":
+                target_cat = term_to_cat.get(skill.lower())
+                if target_cat is None:
+                    continue
+            else:
+                target_cat = llm_cat
             existing = merged.setdefault(target_cat, [])
             if skill.lower() not in {s.lower() for s in existing}:
                 existing.append(skill)
-
-        # Merge new-discovery terms (stored under their taxonomy category)
-        for llm_cat, skills in llm_skills.items():
-            if llm_cat == _MATCHED_CATEGORY:
-                continue
-            for skill in skills:
-                existing = merged.setdefault(llm_cat, [])
-                if skill.lower() not in {s.lower() for s in existing}:
-                    existing.append(skill)
-    else:
-        # Old format — use resolve_category mapping
-        for llm_cat, skills in llm_skills.items():
-            for skill in skills:
-                target_cat = resolve_category(llm_cat, skill, category_map)
-                existing = merged.setdefault(target_cat, [])
-                if skill.lower() not in {s.lower() for s in existing}:
-                    existing.append(skill)
 
     return merged
 
@@ -1199,16 +1132,7 @@ def analyze(
     conn: sqlite3.Connection | None = None,
 ) -> pd.DataFrame:
     """Build a DataFrame with per-job metadata and extracted skills."""
-    # Load LLM → taxonomy category mapping if DB is available
-    category_map: dict[str, str] = {}
-    if conn is not None:
-        category_map = dict(
-            conn.execute(
-                "SELECT llm_category, taxonomy_category FROM llm_category_map"
-            ).fetchall()
-        )
-
-    # Build taxonomy-aware prompt once for the entire run
+    # Build skills-aware prompt once for the entire run
     llm_prompt = _build_llm_prompt(taxonomy) if llm_client else ""
 
     job_rows = []
@@ -1236,7 +1160,6 @@ def analyze(
             skills_found,
             llm_skills,
             taxonomy,
-            category_map,
         )
 
         regex_skills_flat = [skill for hits in skills_found.values() for skill in hits]
@@ -1348,126 +1271,113 @@ def _print_salary_hints(df: pd.DataFrame) -> None:
         print(f"  {label:<40}{loc_hint:<25} {row['salary_extracted']}")
 
 
-def _taxonomy_term_set(taxonomy: dict[str, list[tuple[str, str]]]) -> set[str]:
-    """Return normalized taxonomy keys (including aliases) for membership checks."""
-    return {
-        _taxonomy_plain_key(pattern)
-        for terms in taxonomy.values()
-        for _, pattern in terms
-    }
+def _known_skill_terms(skills: dict[str, list[tuple[str, str]]]) -> set[str]:
+    """Return normalized skill terms (including aliases) for membership checks."""
+    return {display for terms in skills.values() for display, _ in terms}
 
 
-def _count_missing_taxonomy_terms(
+def _count_missing_skill_terms(
     skills_llm_list: list[dict],
-    all_taxonomy_terms: set[str],
+    known_terms: set[str],
 ) -> Counter:
-    """Count LLM terms absent from current taxonomy/alias coverage.
+    """Count LLM terms absent from current skills/alias coverage.
 
-    For new-format results (with ``_matched`` key), only non-matched entries
-    are considered missing. For old-format results, all terms are diffed
-    against the taxonomy.
+    Only non-matched entries (new discoveries) are considered missing.
     """
-    skills_missing_from_taxonomy: Counter = Counter()
+    missing: Counter = Counter()
     for llm_skills in skills_llm_list:
         if not llm_skills:
             continue
         for cat, skills in llm_skills.items():
-            # Skip matched terms — they're already in taxonomy
-            if cat == _MATCHED_CATEGORY:
+            if cat == "_matched":
                 continue
             for skill in skills:
-                canonical = normalize_term(skill)
-                taxonomy_key = _taxonomy_plain_key(skill)
-                if (
-                    canonical not in all_taxonomy_terms
-                    and taxonomy_key not in all_taxonomy_terms
-                ):
-                    skills_missing_from_taxonomy[canonical] += 1
-    return skills_missing_from_taxonomy
+                normalized = normalize_term(skill)
+                if normalized not in known_terms:
+                    missing[normalized] += 1
+    return missing
 
 
 def _build_actionable_missing_terms(
-    skills_missing_from_taxonomy: Counter,
-    existing_candidate_canonicals: set[str],
+    skills_missing: Counter,
+    existing_candidate_terms: set[str],
     threshold: int,
 ) -> Counter:
     """Filter uncovered terms to queue-actionable terms."""
-    skip_canonicals = {normalize_term(term) for term in SKIP_TERMS}
+    skip_normalized = {normalize_term(term) for term in SKIP_TERMS}
     return Counter(
         {
-            canonical: count
-            for canonical, count in skills_missing_from_taxonomy.items()
+            term: count
+            for term, count in skills_missing.items()
             if count >= threshold
-            and canonical not in skip_canonicals
-            and canonical not in existing_candidate_canonicals
+            and term not in skip_normalized
+            and term not in existing_candidate_terms
         }
     )
 
 
-def _print_missing_taxonomy_terms(
-    skills_missing_from_taxonomy: Counter,
-    actionable_missing_terms: Counter,
+def _print_missing_skill_terms(
+    skills_missing: Counter,
+    actionable_missing: Counter,
     threshold: int,
 ) -> None:
     """Print uncovered LLM terms and queue-actionable subset."""
-    if not skills_missing_from_taxonomy:
+    if not skills_missing:
         return
 
     print(
-        f"\nLLM terms not covered by current taxonomy/aliases "
-        f"({len(skills_missing_from_taxonomy)} terms):"
+        f"\nLLM terms not covered by current skills/aliases "
+        f"({len(skills_missing)} terms):"
     )
     print(
         f"  Actionable for queue (threshold >= {threshold}, not SKIP_TERMS, not already queued): "
-        f"{len(actionable_missing_terms)} terms"
+        f"{len(actionable_missing)} terms"
     )
 
-    for skill, count in skills_missing_from_taxonomy.most_common(
+    for skill, count in skills_missing.most_common(
         _REPORT_TOP_MISSING_SKILLS_COUNT
     ):
-        display_skill = re.sub(r"\\(.)", r"\1", skill)
-        print(f"  {display_skill:<{_REPORT_SKILL_WIDTH}} {count} jobs")
+        print(f"  {skill:<{_REPORT_SKILL_WIDTH}} {count} jobs")
 
-    if actionable_missing_terms:
+    if actionable_missing:
         print("\nTop actionable uncovered terms:")
-        for skill, count in actionable_missing_terms.most_common(
+        for skill, count in actionable_missing.most_common(
             _REPORT_TOP_MISSING_SKILLS_COUNT
         ):
-            display_skill = re.sub(r"\\(.)", r"\1", skill)
-            print(f"  {display_skill:<{_REPORT_SKILL_WIDTH}} {count} jobs")
+            print(f"  {skill:<{_REPORT_SKILL_WIDTH}} {count} jobs")
 
     print("  Note: raw uncovered count is broader than pending queue by design.")
 
 
 def _print_llm_section(
     df: pd.DataFrame,
-    taxonomy: dict[str, list[tuple[str, str]]],
-    existing_candidate_canonicals: set[str],
+    skills_catalog: dict[str, list[tuple[str, str]]],
+    existing_candidate_terms: set[str],
     candidate_threshold: int,
 ) -> None:
-    """Print taxonomy coverage gaps discovered by LLM extraction."""
+    """Print skills coverage gaps discovered by LLM extraction."""
     if "skills_llm" not in df.columns or not df["skills_llm"].apply(bool).any():
         return
 
     print(f"\n{'=' * 60}")
-    print("TAXONOMY COVERAGE GAPS (LLM-discovered)")
+    print("SKILLS COVERAGE GAPS (LLM-discovered)")
     print(f"{'=' * 60}")
 
     skills_llm_list: list[dict] = df["skills_llm"].tolist()
 
-    all_taxonomy_terms = _taxonomy_term_set(taxonomy)
-    skills_missing_from_taxonomy = _count_missing_taxonomy_terms(
+    known_terms = _known_skill_terms(skills_catalog)
+    skills_missing = _count_missing_skill_terms(
         skills_llm_list,
-        all_taxonomy_terms,
+        known_terms,
     )
-    actionable_missing_terms = _build_actionable_missing_terms(
-        skills_missing_from_taxonomy,
-        existing_candidate_canonicals,
+    actionable_missing = _build_actionable_missing_terms(
+        skills_missing,
+        existing_candidate_terms,
         candidate_threshold,
     )
-    _print_missing_taxonomy_terms(
-        skills_missing_from_taxonomy,
-        actionable_missing_terms,
+    _print_missing_skill_terms(
+        skills_missing,
+        actionable_missing,
         candidate_threshold,
     )
 
@@ -1626,12 +1536,12 @@ def main() -> None:
         type=int,
         default=None,
         metavar="N",
-        help="Promote pending LLM candidates with jobs_count >= N (default 2) into taxonomy",
+        help="Promote pending LLM candidates with jobs_count >= N (default 2) into skills",
     )
     parser.add_argument(
         "--candidates",
         action="store_true",
-        help="Show pending taxonomy candidates queue (no analysis)",
+        help="Show pending skill candidates queue (no analysis)",
     )
     args = parser.parse_args()
 
@@ -1659,14 +1569,14 @@ def main() -> None:
                 apply_candidates(conn, max(args.promote, 1))
             return
 
-        # Promote before loading taxonomy so analysis uses the enriched term set
+        # Promote before loading skills so analysis uses the enriched term set
         if args.promote is not None:
             apply_candidates(conn, max(args.promote, 1))
 
-        taxonomy = load_taxonomy(conn)
-        term_count = sum(len(terms) for terms in taxonomy.values())
+        skills = load_skills(conn)
+        term_count = sum(len(terms) for terms in skills.values())
         print(
-            f"Taxonomy loaded: {term_count} terms (+ aliases) across {len(taxonomy)} categories"
+            f"Skills loaded: {term_count} terms (+ aliases) across {len(skills)} categories"
         )
 
         print(f"Loading from: {[str(p) for p in paths]}")
@@ -1680,28 +1590,28 @@ def main() -> None:
         if args.llm:
             llm_client = build_llm_client(NINEROUTER_BASE_URL, NINEROUTER_MODEL)
 
-        df = analyze(jobs, taxonomy, llm_client=llm_client, conn=conn)
+        df = analyze(jobs, skills, llm_client=llm_client, conn=conn)
 
         # After LLM extraction, auto-queue newly discovered terms as candidates
         if args.llm and llm_client:
             promote_llm_to_candidates(conn, threshold=LLM_CANDIDATE_THRESHOLD)
 
-        existing_candidate_canonicals = {
-            row["canonical"]
-            for row in conn.execute("SELECT canonical FROM taxonomy_candidates")
+        existing_candidate_terms = {
+            row["term"]
+            for row in conn.execute("SELECT term FROM skill_candidates")
         }
     finally:
         conn.close()
 
     print_report(
         df,
-        taxonomy,
-        existing_candidate_canonicals=existing_candidate_canonicals,
+        skills,
+        existing_candidate_terms,
         candidate_threshold=LLM_CANDIDATE_THRESHOLD,
     )
 
     output_stem = paths[0].stem if len(paths) == 1 else "jobs_all"
-    save_excel(df, data_dir / f"{output_stem}_analysis.xlsx", taxonomy)
+    save_excel(df, data_dir / f"{output_stem}_analysis.xlsx", skills)
 
 
 if __name__ == "__main__":

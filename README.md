@@ -25,7 +25,7 @@ stackpulse/
 └── data/
     ├── jobs_YYYY-MM-DD.json        # one file per scrape day
     ├── jobs_*_analysis.xlsx        # Excel export with one column per skill category
-    ├── skills.db                   # SQLite: taxonomy + LLM extraction cache
+    ├── skills.db                   # SQLite: skills catalog + LLM extraction cache
     ├── scraper.log                 # timestamped run log
     └── debug/                      # screenshots + HTML dumped when a page fails to load
 ```
@@ -173,35 +173,35 @@ Prints a skill frequency table to stdout and saves `data/jobs_*_analysis.xlsx` w
 |--------------------|-----------------------------------------------------------------------------------|
 | Extraction quality | Jobs with empty description and jobs with zero skills extracted (%)               |
 | Top skills         | Frequency + prevalence % + bar; uses merged regex+LLM metric when `--llm` was run |
-| By category        | Top terms per taxonomy category with prevalence % (regex + LLM unified)           |
+| By category        | Top terms per skill category with prevalence % (regex + LLM unified)              |
 | Top locations      | Most frequent scraped `location` values                                           |
 | Skills by location | Top 3 skills per `search_location` (only shown when >1 search location present)   |
 | Salary hints       | Postings where a salary pattern was regex-extracted (with company + location)     |
-| Coverage gaps      | Taxonomy terms discovered by LLM but not yet in taxonomy (only with `--llm`)      |
+| Coverage gaps      | Skills discovered by LLM but not yet in catalog (only with `--llm`)               |
 
 `--llm` mode calls `NINEROUTER_MODEL` through your local 9router endpoint (`NINEROUTER_BASE_URL`, default
-`http://localhost:20128/v1`) with a **taxonomy-aware prompt** — the full taxonomy is sent to the LLM so it matches
+`http://localhost:20128/v1`) with a **skills-aware prompt** — the full skills catalog is sent to the LLM so it matches
 against known terms first and only flags genuinely new discoveries. Results are cached in `data/skills.db` — repeat
 runs are instant with no API calls.
 
 After each `--llm` run, newly discovered terms (seen in ≥ `LLM_CANDIDATE_THRESHOLD` jobs, default 2) are automatically
-queued in `taxonomy_candidates`. Because the LLM is taxonomy-aware, uncovered terms are genuinely new
+queued in `skill_candidates`. Because the LLM is skills-aware, uncovered terms are genuinely new
 technologies/tools — not synonyms or generic concepts.
 
 `--llm` prints two gap metrics: raw uncovered terms and actionable uncovered terms. Actionable terms satisfy
-`jobs_count >= threshold`, are not in `SKIP_TERMS`, and are not already present in `taxonomy_candidates`.
+`jobs_count >= threshold`, are not in `SKIP_TERMS`, and are not already present in `skill_candidates`.
 
 **Rate-limit handling (429):** `analyze.py` parses retry wait from the provider error. If wait ≤
 `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` (default `30`), it sleeps and retries once. For longer waits (daily quota exhausted),
 it falls back to `NINEROUTER_FALLBACK_MODEL` if configured.
 
-### 4. Promote LLM-discovered skills into taxonomy
+### 4. Promote LLM-discovered skills into catalog
 
 ```bash
 py analyze.py --candidates                 # inspect the promotion queue (all statuses + pending)
-py analyze.py --promote                    # promote pending terms (≥2 jobs) into taxonomy
+py analyze.py --promote                    # promote pending terms (≥2 jobs) into skills catalog
 py analyze.py --promote 3                  # same, threshold = 3 jobs
-py analyze.py --all --promote              # promote first, then analyze with enriched taxonomy
+py analyze.py --all --promote              # promote first, then analyze with enriched skills
 
 # Typer CLI equivalents
 stackpulse analyze --candidates
@@ -215,7 +215,7 @@ Once promoted, terms are matched by regex in all future runs — **no `--llm` fl
 To reject a term so it never reappears:
 
 ```bash
-sqlite3 data/skills.db "UPDATE taxonomy_candidates SET status='rejected' WHERE canonical='<term>'"
+sqlite3 data/skills.db "UPDATE skill_candidates SET status='rejected' WHERE term='<term>'"
 ```
 
 ---
@@ -313,10 +313,11 @@ runs.
 
 ---
 
-## Skill taxonomy (`data/skills.db`)
+## Skills catalog (`data/skills.db`)
 
 17 categories, 227+ terms, stored in `data/skills.db` (SQLite). The DB is auto-created and seeded from `SKILLS_SEED` in
-`analyze.py` on first run. Additional terms accumulate automatically via the LLM promotion pipeline.
+`analyze.py` on first run. Terms are stored as plain lowercase text; regex escaping is applied at load time only.
+Additional terms accumulate automatically via the LLM promotion pipeline.
 
 | Category                   | Examples                                                 |
 |----------------------------|----------------------------------------------------------|
@@ -341,15 +342,15 @@ runs.
 Add term without code change:
 
 ```bash
-sqlite3 data/skills.db "INSERT OR IGNORE INTO taxonomy(category,term) VALUES('Cloud','hetzner')"
+sqlite3 data/skills.db "INSERT OR IGNORE INTO skills(category,term) VALUES('Cloud','hetzner')"
 ```
 
 Add alias (e.g. multilingual synonym):
 
 ```bash
 sqlite3 data/skills.db \
-  "INSERT INTO term_aliases(taxonomy_id,alias,canonical,lang,alias_type)
-   SELECT id,'Node.js','node\.js','en','variant' FROM taxonomy WHERE term='node\.js'"
+  "INSERT INTO skill_aliases(skill_id,alias,canonical,lang,alias_type)
+   SELECT id,'Node.js','node.js','en','variant' FROM skills WHERE term='node.js'"
 ```
 
 Top LLM-discovered skills across all jobs:
@@ -361,7 +362,7 @@ sqlite3 data/skills.db "SELECT skill, COUNT(DISTINCT url_key) jobs FROM llm_resu
 Promotion queue view:
 
 ```bash
-sqlite3 data/skills.db "SELECT term, taxonomy_category, jobs_count, status FROM taxonomy_candidates ORDER BY jobs_count DESC"
+sqlite3 data/skills.db "SELECT term, category, jobs_count, status FROM skill_candidates ORDER BY jobs_count DESC"
 ```
 
 ---
@@ -375,8 +376,7 @@ sqlite3 data/skills.db "SELECT term, taxonomy_category, jobs_count, status FROM 
 - **LinkedIn UI drift:** CSS selectors can break due to A/B tests. If fields become `null`, inspect `data/debug/`
   snapshots and update selector lists.
 - **LLM quota limits:** long quota windows skip sleep-retry and use fallback model if configured.
-- **Single-letter language matching:** `c` is matched as `\bc\b` which can false-positive on the English word. The
-  taxonomy pattern system uses `_unescape()` to derive display names, so complex regex patterns cannot be stored.
+- **Single-letter language matching:** `c` is matched as `\bc\b` which can false-positive on the English word.
   LLM extraction correctly disambiguates C language from prose.
 - **Best-effort extraction paths:** scraper field extractors fail soft by design and continue fallback traversal; debug
   logs now include selector/button context to make drift diagnosis faster.

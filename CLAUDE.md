@@ -37,11 +37,11 @@ py analyze.py --all         # merge all data/jobs_*.json files
 py analyze.py --llm         # + LLM extraction via 9router, results cached in skills.db
 py analyze.py --all --llm
 
-# LLM → taxonomy promotion pipeline
+# LLM → skill promotion pipeline
 py analyze.py --candidates           # inspect queue of LLM-discovered pending terms
-py analyze.py --promote              # promote pending terms (≥2 jobs) into taxonomy
+py analyze.py --promote              # promote pending terms (≥2 jobs) into skills catalog
 py analyze.py --promote 3            # same, threshold = 3 jobs
-py analyze.py --all --promote        # promote first, then analyze with enriched taxonomy
+py analyze.py --all --promote        # promote first, then analyze with enriched skills
 ```
 
 `stackpulse auto` defaults:
@@ -96,26 +96,30 @@ config.py (queries + timeouts + paths + LLM settings)
   → job_scraper_direct.py   scrapes each URL → dict
   → data/jobs_YYYY-MM-DD.json   incremental save after each job
   → analyze.py              loads JSON(s)
-      ├─ regex-matches taxonomy from data/skills.db → stdout report + .xlsx
+      ├─ regex-matches skills from data/skills.db → stdout report + .xlsx
       └─ (--llm) calls configured model via 9router → open skill extraction
                  on 429: sleeps parsed wait time (≤ LLM_RATE_LIMIT_MAX_WAIT_SECONDS) and retries once,
                          then falls back to NINEROUTER_FALLBACK_MODEL if configured
                  results stored in data/skills.db (llm_results table), cached per job URL
-                 → promote_llm_to_candidates() auto-queues new terms in taxonomy_candidates
-                 → py analyze.py --promote moves approved candidates into taxonomy
+                 → promote_llm_to_candidates() auto-queues new terms in skill_candidates
+                 → py analyze.py --promote moves approved candidates into skills
 ```
 
 **`data/skills.db` tables:**
 
-- `taxonomy(category, term)` — the skill list; seeded from `SKILLS_SEED` in `analyze.py` on first run; editable via SQL
-- `llm_results(url_key, url, category, skill)` — LLM extraction results, one row per skill per job; keyed by MD5 of URL.
-  New-format entries use `_matched` as category for taxonomy-matched terms; old-format entries use LLM category names
-- `llm_category_map(llm_category, taxonomy_category)` — maps LLM's 8 output categories to taxonomy categories; used
-  only for old-format cache entries. New entries bypass this via direct taxonomy category from LLM
-- `taxonomy_candidates(term, canonical, taxonomy_category, llm_category, jobs_count, status, added_date)` — promotion
-  queue; `status` is `pending` / `approved` / `rejected`
-- `term_aliases(taxonomy_id, alias, canonical, lang, alias_type)` — synonyms and multilingual variants for existing
-  taxonomy terms; seeded with `python3`/`python 3`
+- `skills(category, term)` — the skill catalog; seeded from `SKILLS_SEED` in `analyze.py` on first run; editable via SQL.
+  Terms are stored as plain lowercase text (e.g. `c++`, `node.js`); regex escaping is applied at load time only.
+- `llm_results(url_key, url, category, skill, is_matched)` — LLM extraction results, one row per skill per job; keyed
+  by MD5 of URL. `is_matched=1` for terms already in the skills catalog (stored with their actual category);
+  `is_matched=0` for new discoveries (stored with LLM-suggested category).
+- `skill_candidates(term, category, llm_category, jobs_count, status, added_date, decided_date)` — promotion queue;
+  `status` is `pending` / `approved` / `rejected`. `term` is plain lowercase text matching `skills.term` format.
+- `skill_aliases(skill_id, alias, canonical, lang, alias_type)` — synonyms and multilingual variants for existing
+  skills; seeded with `python3`/`python 3`
+
+LLM category → skills category mapping is a Python constant `_LLM_CATEGORY_MAP` in `analyze.py` (no DB table).
+Ambiguous LLM categories (`databases`, `concepts`) are refined via `_CATEGORY_HINTS` keyword matching in
+`resolve_category()`.
 
 ## Key design decisions
 
@@ -132,26 +136,25 @@ failing soft to the next fallback.
 **Salary**: not a structured LinkedIn field. `extract_salary()` in `scrape.py` regex-scans `job_description` text for
 currency patterns and stores the result in `salary_extracted`.
 
-**Taxonomy term storage**: `taxonomy.term` stores the regex pattern, not the display string. Most terms are plain
-lowercase (e.g. `github actions`). Special characters must be pre-escaped (e.g. `c\+\+` for C++). `load_taxonomy()`
-unescapes patterns back to display strings via `re.sub(r"\\(.)", r"\1", term)`.
+**Skill term storage**: `skills.term` stores plain lowercase text (e.g. `c++`, `node.js`). `load_skills()` applies
+`re.escape()` at load time to build regex patterns for word-boundary matching. No unescape helpers needed.
 
-**Taxonomy-aware LLM prompt**: `_build_llm_prompt(taxonomy)` serializes all taxonomy terms grouped by category into
-the prompt so the LLM matches against known terms first. The LLM returns `{"matched": [...], "new_terms": [...]}`
-instead of 8 generic categories. `_normalize_llm_result()` converts this to cache format using `_MATCHED_CATEGORY`
-(`"_matched"`) as a synthetic key for matched terms and the LLM-suggested taxonomy category for new discoveries.
-Old-format cache entries (without `_matched`) are handled transparently via the existing `resolve_category()` path.
+**Skills-aware LLM prompt**: `_build_llm_prompt(skills)` serializes all skill terms grouped by category into
+the prompt so the LLM matches against known terms first. The LLM returns `{"matched": [...], "new_terms": [...]}`.
+`_normalize_llm_result()` converts this to internal format with `"_matched"` key for known terms. When writing to DB,
+`_llm_cache_set()` stores matched terms with `is_matched=1` and their actual skills category, new terms with
+`is_matched=0`.
 
-**LLM → taxonomy pipeline**: `--llm` extracts skills via LLM and caches results in `llm_results`. After each run,
+**LLM → skills pipeline**: `--llm` extracts skills via LLM and caches results in `llm_results`. After each run,
 `promote_llm_to_candidates()` automatically queues terms seen in ≥ `LLM_CANDIDATE_THRESHOLD` jobs (default 2, set in
-`config.py`) that are absent from taxonomy/alias coverage. `_matched` entries are excluded from candidate aggregation.
-`--promote` moves pending candidates into `taxonomy`, making them available in all future regex-based runs.
+`config.py`) that are absent from skills/alias coverage. `is_matched=1` entries are excluded from candidate aggregation.
+`--promote` moves pending candidates into `skills`, making them available in all future regex-based runs.
 
 **Coverage gap vs queue status**: `--llm` reports two metrics: raw uncovered terms and actionable uncovered terms.
-Because the LLM is taxonomy-aware, uncovered terms are genuinely new discoveries — not synonyms or variants.
+Because the LLM is skills-aware, uncovered terms are genuinely new discoveries — not synonyms or variants.
 Actionable terms require `jobs_count >= threshold`, exclusion from `SKIP_TERMS`, and absence from existing
-`taxonomy_candidates`. `--candidates` shows queue state only (`pending`/`approved`/`rejected`), so it will diverge from
-raw uncovered counts. Uncovered terms are printed as unescaped display text.
+`skill_candidates`. `--candidates` shows queue state only (`pending`/`approved`/`rejected`), so it will diverge from
+raw uncovered counts.
 
 **LLM 429 / rate-limit handling**: `extract_skills_llm()` uses `_call_llm_with_retry()` and
 `_extract_skills_with_models()` to keep retry/fallback logic isolated. It parses suggested wait from the error message (
@@ -161,22 +164,21 @@ Non-rate-limit errors (`APIError`, `APIConnectionError`, `JSONDecodeError`, `Val
 broad `except Exception` is not used.
 
 **`SKIP_TERMS`**: generic noise terms (`api`, `testing`, `automation`, etc.) that are blacklisted from entering
-`taxonomy_candidates`.
+`skill_candidates`.
 
 **Public analyze API**: `resolve_input_paths(args, data_dir)` and `build_llm_client(base_url, model)` are public
 functions (no leading underscore). `cli.py` calls them directly via `import analyze as analyzer`. `_VALID_DB_TABLES` is
 an allowlist used by `_table_is_empty()` to guard against raw SQL table-name injection.
 
-**Unified skills pipeline**: `analyze()` builds `skills_by_category` per job — regex taxonomy hits merged with
-LLM-discovered terms via `_build_comprehensive_by_category()` (case-insensitive dedup). For new-format results
-(`_matched` key present), matched terms are routed to their taxonomy category via reverse lookup; new discoveries use
-their LLM-suggested category directly. For old-format cache entries, `resolve_category()` with `_CONCEPT_HINTS` and
-`_DB_HINTS` is used as fallback. All downstream consumers (category breakdown, top-N, Excel export, per-location
-stats) use this unified view. `all_skills_flat` (regex-only) is preserved for backward compatibility.
+**Unified skills pipeline**: `analyze()` builds `skills_by_category` per job — regex hits merged with LLM-discovered
+terms via `_build_comprehensive_by_category()` (case-insensitive dedup). Matched terms are routed to their skills
+category via reverse lookup; new discoveries use their LLM-suggested category directly. All downstream consumers
+(category breakdown, top-N, Excel export, per-location stats) use this unified view. `all_skills_flat` (regex-only) is
+preserved for backward compatibility.
 
 **Report additions**: `print_report` now calls `_print_quality_summary` (empty-description + zero-skill-job counts) and
 `_print_skills_by_location` (top 3 skills per unique `search_location`, skipped when ≤1 location). Category breakdown
-includes prevalence % per top term. The LLM section shows only taxonomy coverage gaps (terms not yet in taxonomy),
+includes prevalence % per top term. The LLM section shows only skills coverage gaps (terms not yet in catalog),
 not redundant LLM aggregates.
 
 **Field coverage logging**: `_log_run_summary` logs counts of jobs missing `job_description`, `job_title`, and
@@ -197,7 +199,7 @@ LinkedIn search autocomplete accepts (e.g. `"Berlin, Germany"` not `"Berlin"`).
 
 ## Extending skill detection
 
-Taxonomy is stored in `data/skills.db`, not hardcoded. Ways to add terms:
+Skills catalog is stored in `data/skills.db`, not hardcoded. Ways to add terms:
 
 **Via the promotion pipeline (recommended):**
 
@@ -209,25 +211,43 @@ py analyze.py --promote
 **Via SQL (immediate, no code change):**
 
 ```bash
-sqlite3 data/skills.db "INSERT OR IGNORE INTO taxonomy(category,term) VALUES('Cloud','hetzner')"
+sqlite3 data/skills.db "INSERT OR IGNORE INTO skills(category,term) VALUES('Cloud','hetzner')"
 ```
 
-**Via code (to persist across DB resets):** edit `SKILLS_SEED` in `analyze.py`. Terms are matched as whole words (`\b`
-boundary) against lowercased `job_title + job_description`. Escape special regex characters (e.g. `"c\\+\\+"` for C++,
-`"node\\.js"` for Node.js).
+**Via code (to persist across DB resets):** edit `SKILLS_SEED` in `analyze.py`. Terms are stored as plain lowercase
+text and matched as whole words (`\b` boundary) against lowercased `job_title + job_description`. No escaping needed
+in the seed — `normalize_term()` handles it; `re.escape()` is applied at load time.
 
 **Add a multilingual alias:**
 
 ```bash
 sqlite3 data/skills.db \
-  "INSERT INTO term_aliases(taxonomy_id,alias,canonical,lang,alias_type)
-   SELECT id,'Deutsch','deutsch','de','translation' FROM taxonomy WHERE term='german'"
+  "INSERT INTO skill_aliases(skill_id,alias,canonical,lang,alias_type)
+   SELECT id,'Deutsch','deutsch','de','translation' FROM skills WHERE term='german'"
 ```
 
-**Adjust LLM category → taxonomy category mapping:**
-
-```bash
-sqlite3 data/skills.db "UPDATE llm_category_map SET taxonomy_category='Testing' WHERE llm_category='concepts'"
-```
+**Adjust LLM category refinement:** edit `_CATEGORY_HINTS` dict in `analyze.py` (no DB table — it's a Python constant).
 
 To reset the DB and re-seed from `SKILLS_SEED`: `rm data/skills.db` then re-run `analyze.py`.
+
+## Future improvements
+
+**Remove `resolve_category()` entirely**: Currently kept for `promote_llm_to_candidates()` which maps old-style LLM
+categories (`"databases"`, `"concepts"`) to specific sub-categories via `_CATEGORY_HINTS`. Once we update the LLM
+prompt to return actual catalog categories directly (instead of generic 8 categories), `resolve_category()` and
+`_CATEGORY_HINTS` become dead code. The LLM already receives the full category list — just needs a prompt tweak to
+require exact category names in `new_terms[].category`.
+
+**Remove `load_taxonomy` alias**: The backward-compat alias `load_taxonomy = load_skills` in `analyze.py` exists for
+any external consumers. Can be dropped once confirmed nothing depends on the old name.
+
+**Move `_CATEGORY_HINTS` to DB or config**: Currently hardcoded Python tuples. Could be a `category_hints` table or
+a section in `config.py` for easier editing without touching `analyze.py` source. Low priority since hints will be
+eliminated once the LLM prompt returns exact categories.
+
+**Migrate old `llm_results` cache**: Old-format entries (from before the `is_matched` column) may exist in production
+DBs. A one-time migration script could backfill `is_matched` by checking each skill against the `skills` table.
+Currently harmless — `_llm_cache_get` returns them as new-discovery entries, which is conservative but correct.
+
+**Single-letter `c` false positives**: `\bc\b` matches the English word "c" in prose. Options: require `c` only from
+LLM extraction (high precision), use a negative lookahead pattern, or rename the term to `c language` with alias `c`.

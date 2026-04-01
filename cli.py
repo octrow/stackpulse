@@ -244,10 +244,10 @@ def _run_analysis_pipeline(
     if promote is not None:
         analyzer.apply_candidates(conn, promote)
 
-    taxonomy = analyzer.load_taxonomy(conn)
-    term_count = sum(len(terms) for terms in taxonomy.values())
+    skills = analyzer.load_skills(conn)
+    term_count = sum(len(terms) for terms in skills.values())
     console.print(
-        f"Taxonomy loaded: {term_count} terms (+ aliases) across {len(taxonomy)} categories"
+        f"Skills loaded: {term_count} terms (+ aliases) across {len(skills)} categories"
     )
 
     console.print(f"Loading from: {[str(p) for p in paths]}")
@@ -279,21 +279,19 @@ def _run_analysis_pipeline(
             analyzer.NINEROUTER_MODEL,
         )
 
-    df = analyzer.analyze(jobs, taxonomy, llm_client=llm_client, conn=conn)
+    df = analyzer.analyze(jobs, skills, llm_client=llm_client, conn=conn)
 
     if use_llm and llm_client:
         analyzer.promote_llm_to_candidates(conn, threshold=LLM_CANDIDATE_THRESHOLD)
 
-    existing_candidate_canonicals = {
-        row[0] for row in conn.execute("SELECT canonical FROM taxonomy_candidates")
+    existing_candidate_terms = {
+        row[0] for row in conn.execute("SELECT term FROM skill_candidates")
     }
 
-    analyzer.print_report(
-        df, taxonomy, existing_candidate_canonicals, LLM_CANDIDATE_THRESHOLD
-    )
+    analyzer.print_report(df, skills, existing_candidate_terms, LLM_CANDIDATE_THRESHOLD)
 
     output_stem = paths[0].stem if len(paths) == 1 else "jobs_all"
-    analyzer.save_excel(df, data_dir / f"{output_stem}_analysis.xlsx", taxonomy)
+    analyzer.save_excel(df, data_dir / f"{output_stem}_analysis.xlsx", skills)
     console.print("[green]Analysis completed.[/green]")
 
 
@@ -303,9 +301,7 @@ def analyze(
     all_files: bool = typer.Option(
         False, "--all", help="Analyze all data/jobs_*.json files"
     ),
-    llm: bool = typer.Option(
-        False, "--llm", help="Enable open-taxonomy LLM extraction"
-    ),
+    llm: bool = typer.Option(False, "--llm", help="Enable LLM skill extraction"),
     promote: Optional[int] = typer.Option(
         None,
         "--promote",
@@ -315,7 +311,7 @@ def analyze(
     candidates: bool = typer.Option(
         False,
         "--candidates",
-        help="Show taxonomy candidates queue and exit",
+        help="Show skill candidates queue and exit",
     ),
     title_contains: Optional[str] = typer.Option(
         None,
