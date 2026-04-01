@@ -107,19 +107,20 @@ config.py (queries + timeouts + paths + LLM settings)
 
 **`data/skills.db` tables:**
 
-- `skills(category, term)` — the skill catalog; seeded from `SKILLS_SEED` in `analyze.py` on first run; editable via SQL.
+- `categories(id, name)` — canonical category names; seeded from `SKILLS_SEED` keys on first run.
+- `skills(id, category_id, term)` — the skill catalog; `category_id` FK → `categories`. Seeded from `SKILLS_SEED`
+  in `analyze.py` on first run; editable via SQL.
   Terms are stored as plain lowercase text (e.g. `c++`, `node.js`); regex escaping is applied at load time only.
-- `llm_results(url_key, url, category, skill, is_matched)` — LLM extraction results, one row per skill per job; keyed
-  by MD5 of URL. `is_matched=1` for terms already in the skills catalog (stored with their actual category);
-  `is_matched=0` for new discoveries (stored with LLM-suggested category).
-- `skill_candidates(term, category, llm_category, jobs_count, status, added_date, decided_date)` — promotion queue;
-  `status` is `pending` / `approved` / `rejected`. `term` is plain lowercase text matching `skills.term` format.
+- `llm_results(url_key, url, category_id, skill, is_matched)` — LLM extraction results, one row per skill per job;
+  keyed by MD5 of URL. `is_matched=1` for terms already in the skills catalog; `is_matched=0` for new discoveries.
+  `category_id` FK → `categories`.
+- `skill_candidates(id, term, category_id, llm_category_id, jobs_count, status, added_date, decided_date)` — promotion
+  queue; both FK → `categories`. `status` is `pending` / `approved` / `rejected`.
 - `skill_aliases(skill_id, alias, canonical, lang, alias_type)` — synonyms and multilingual variants for existing
   skills; seeded with `python3`/`python 3`
 
-LLM category → skills category mapping is a Python constant `_LLM_CATEGORY_MAP` in `analyze.py` (no DB table).
-Ambiguous LLM categories (`databases`, `concepts`) are refined via `_CATEGORY_HINTS` keyword matching in
-`resolve_category()`.
+The LLM prompt instructs the model to use exact `categories.name` values for `new_terms[].category`. No mapping
+layer needed — `_migrate_schema()` handles old-format rows on existing DBs.
 
 ## Key design decisions
 
@@ -211,7 +212,7 @@ py analyze.py --promote
 **Via SQL (immediate, no code change):**
 
 ```bash
-sqlite3 data/skills.db "INSERT OR IGNORE INTO skills(category,term) VALUES('Cloud','hetzner')"
+sqlite3 data/skills.db "INSERT OR IGNORE INTO skills(category_id,term) SELECT id,'hetzner' FROM categories WHERE name='Cloud'"
 ```
 
 **Via code (to persist across DB resets):** edit `SKILLS_SEED` in `analyze.py`. Terms are stored as plain lowercase
@@ -226,28 +227,4 @@ sqlite3 data/skills.db \
    SELECT id,'Deutsch','deutsch','de','translation' FROM skills WHERE term='german'"
 ```
 
-**Adjust LLM category refinement:** edit `_CATEGORY_HINTS` dict in `analyze.py` (no DB table — it's a Python constant).
-
 To reset the DB and re-seed from `SKILLS_SEED`: `rm data/skills.db` then re-run `analyze.py`.
-
-## Future improvements
-
-**Remove `resolve_category()` entirely**: Currently kept for `promote_llm_to_candidates()` which maps old-style LLM
-categories (`"databases"`, `"concepts"`) to specific sub-categories via `_CATEGORY_HINTS`. Once we update the LLM
-prompt to return actual catalog categories directly (instead of generic 8 categories), `resolve_category()` and
-`_CATEGORY_HINTS` become dead code. The LLM already receives the full category list — just needs a prompt tweak to
-require exact category names in `new_terms[].category`.
-
-**Remove `load_taxonomy` alias**: The backward-compat alias `load_taxonomy = load_skills` in `analyze.py` exists for
-any external consumers. Can be dropped once confirmed nothing depends on the old name.
-
-**Move `_CATEGORY_HINTS` to DB or config**: Currently hardcoded Python tuples. Could be a `category_hints` table or
-a section in `config.py` for easier editing without touching `analyze.py` source. Low priority since hints will be
-eliminated once the LLM prompt returns exact categories.
-
-**Migrate old `llm_results` cache**: Old-format entries (from before the `is_matched` column) may exist in production
-DBs. A one-time migration script could backfill `is_matched` by checking each skill against the `skills` table.
-Currently harmless — `_llm_cache_get` returns them as new-discovery entries, which is conservative but correct.
-
-**Single-letter `c` false positives**: `\bc\b` matches the English word "c" in prose. Options: require `c` only from
-LLM extraction (high precision), use a negative lookahead pattern, or rename the term to `c language` with alias `c`.

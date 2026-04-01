@@ -14,7 +14,7 @@ Usage:
 
 DB: data/skills.db stores skills catalog + LLM results (auto-created on first run).
 To add a term without touching code:
-    sqlite3 data/skills.db "INSERT OR IGNORE INTO skills(category,term) VALUES('Cloud','hetzner')"
+    sqlite3 data/skills.db "INSERT OR IGNORE INTO skills(category_id,term) SELECT id,'hetzner' FROM categories WHERE name='Cloud'"
 To reject a candidate so it never gets promoted:
     sqlite3 data/skills.db "UPDATE skill_candidates SET status='rejected' WHERE term='<term>'"
 To add an alias (e.g. German synonym):
@@ -69,7 +69,7 @@ SKILLS_SEED: dict[str, list[str]] = {
         "elixir",
         "bash",
         "sql",
-        "c",
+        "c language",
     ],
     "Python Frameworks": [
         "fastapi",
@@ -348,46 +348,6 @@ SKIP_TERMS: set[str] = {
 }
 
 # Maps LLM output category names → skills catalog categories (constant, not in DB)
-_LLM_CATEGORY_MAP: dict[str, str] = {
-    "languages": "Languages",
-    "frameworks": "Python Frameworks",
-    "libraries": "Python Libraries",
-    "databases": "Databases — Relational",  # refined per-term by _CATEGORY_HINTS
-    "cloud_services": "Cloud",
-    "devops": "IaC & CI/CD",
-    "tools": "Containers & Orchestration",
-    "concepts": "API & Architecture",
-}
-
-# Keyword hints to refine ambiguous LLM categories into specific sub-categories
-_CATEGORY_HINTS: dict[str, list[tuple[set[str], str]]] = {
-    "databases": [
-        (
-            {"postgresql", "postgres", "mysql", "mariadb", "aurora", "sqlite",
-             "cockroach", "tidb", "rds"},
-            "Databases — Relational",
-        ),
-        (
-            {"redis", "mongo", "elastic", "opensearch", "dynamo", "cassandra",
-             "neo4j", "firestore", "couchdb", "nosql"},
-            "Databases — NoSQL / Search",
-        ),
-        (
-            {"bigquery", "snowflake", "redshift", "databricks", "clickhouse",
-             "dbt", "iceberg", "duckdb", "data lake"},
-            "Databases — Analytical",
-        ),
-    ],
-    "concepts": [
-        (
-            {"ai", "machine learning", "ml", "deep learning", "neural", "llm",
-             "generative ai", "rag", "nlp", "computer vision", "agentic",
-             "prompt engineering", "fine-tuning", "multi-agent",
-             "large language model"},
-            "AI / ML (mentioned in JD)",
-        ),
-    ],
-}
 
 # Initial alias seeds: (skill_term, alias_text, language, alias_type)
 # Only seeded when skill_aliases table is empty.
@@ -401,16 +361,13 @@ ALIAS_SEED: list[tuple[str, str, str, str]] = [
 
 _VALID_DB_TABLES: frozenset[str] = frozenset(
     {
+        "categories",
         "skills",
         "llm_results",
         "skill_candidates",
         "skill_aliases",
     }
 )
-
-# Fallback category names used in resolve_category
-_DEFAULT_DB_CATEGORY = "Databases — Relational"
-_DEFAULT_LLM_CATEGORY = "API & Architecture"
 
 # ── Display formatting constants ──────────────────────────────────────────────
 
@@ -451,49 +408,41 @@ def normalize_term(term: str) -> str:
     return re.sub(r"\s+", " ", normalised)
 
 
-def resolve_category(llm_category: str, term: str) -> str:
-    """Map an LLM category + term to the best-matching skills catalog category."""
-    term_lower = term.lower()
-    hints = _CATEGORY_HINTS.get(llm_category)
-    if hints:
-        for keywords, target_category in hints:
-            if any(keyword in term_lower for keyword in keywords):
-                return target_category
-        if llm_category == "databases":
-            return _DEFAULT_DB_CATEGORY
-    return _LLM_CATEGORY_MAP.get(llm_category, _DEFAULT_LLM_CATEGORY)
-
-
 def init_db(conn: sqlite3.Connection) -> None:
-    """Create tables; seed skills and aliases on first run."""
+    """Create tables; seed categories, skills, and aliases on first run."""
     conn.executescript("""
+        CREATE TABLE IF NOT EXISTS categories (
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE
+        );
+
         CREATE TABLE IF NOT EXISTS skills (
-            id       INTEGER PRIMARY KEY AUTOINCREMENT,
-            category TEXT NOT NULL,
-            term     TEXT NOT NULL,
-            UNIQUE(category, term)
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            category_id INTEGER NOT NULL REFERENCES categories(id),
+            term        TEXT NOT NULL,
+            UNIQUE(category_id, term)
         );
 
         CREATE TABLE IF NOT EXISTS llm_results (
-            url_key    TEXT NOT NULL,
-            url        TEXT NOT NULL,
-            category   TEXT NOT NULL,
-            skill      TEXT NOT NULL,
-            is_matched INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (url_key, category, skill)
+            url_key     TEXT NOT NULL,
+            url         TEXT NOT NULL,
+            category_id INTEGER NOT NULL REFERENCES categories(id),
+            skill       TEXT NOT NULL,
+            is_matched  INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (url_key, category_id, skill)
         );
 
         -- Review queue: LLM-discovered terms pending skills inclusion
         CREATE TABLE IF NOT EXISTS skill_candidates (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            term              TEXT NOT NULL,
-            category          TEXT NOT NULL,
-            llm_category      TEXT NOT NULL,
-            jobs_count        INTEGER DEFAULT 0,
-            status            TEXT DEFAULT 'pending',
-            added_date        TEXT NOT NULL,
-            decided_date      TEXT,
-            UNIQUE(term, category)
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            term            TEXT NOT NULL,
+            category_id     INTEGER NOT NULL REFERENCES categories(id),
+            llm_category_id INTEGER NOT NULL REFERENCES categories(id),
+            jobs_count      INTEGER DEFAULT 0,
+            status          TEXT DEFAULT 'pending',
+            added_date      TEXT NOT NULL,
+            decided_date    TEXT,
+            UNIQUE(term, category_id)
         );
 
         -- Aliases and multilingual synonyms for existing skills
@@ -511,14 +460,26 @@ def init_db(conn: sqlite3.Connection) -> None:
     """)
     conn.commit()
 
-    if _table_is_empty(conn, "skills"):
-        seed_rows = [
-            (category, normalize_term(term))
-            for category, terms in SKILLS_SEED.items()
-            for term in terms
-        ]
+    _migrate_schema(conn)
+
+    if _table_is_empty(conn, "categories"):
         conn.executemany(
-            "INSERT OR IGNORE INTO skills(category, term) VALUES(?, ?)", seed_rows
+            "INSERT OR IGNORE INTO categories(name) VALUES(?)",
+            [(name,) for name in SKILLS_SEED],
+        )
+        conn.commit()
+
+    if _table_is_empty(conn, "skills"):
+        seed_rows = []
+        for category, terms in SKILLS_SEED.items():
+            cat_row = conn.execute(
+                "SELECT id FROM categories WHERE name=?", (category,)
+            ).fetchone()
+            if cat_row:
+                for term in terms:
+                    seed_rows.append((cat_row["id"], normalize_term(term)))
+        conn.executemany(
+            "INSERT OR IGNORE INTO skills(category_id, term) VALUES(?, ?)", seed_rows
         )
         conn.commit()
         print(f"  [DB] Seeded skills with {len(seed_rows)} terms.")
@@ -539,6 +500,131 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+# Old-style LLM category names used before the strict-prompt change.
+# Used only in _migrate_schema to remap existing llm_results / skill_candidates rows.
+_OLD_CATEGORY_REMAP: dict[str, str] = {
+    "languages": "Languages",
+    "frameworks": "Python Frameworks",
+    "libraries": "Python Libraries",
+    "cloud_services": "Cloud",
+    "devops": "IaC & CI/CD",
+    "tools": "Containers & Orchestration",
+    "concepts": "API & Architecture",
+    "databases": "Databases — Relational",
+}
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Idempotent migration: convert old text-category schema to category_id FK schema.
+
+    Detects whether migration is needed by checking for the legacy 'category' column
+    on the skills table. If found, recreates all three tables with FK columns.
+    Also remaps old-style LLM category names to catalog names beforehand.
+    Renames legacy 'c' skill to 'c language'.
+    """
+    skills_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(skills)").fetchall()
+    }
+    if "category_id" in skills_cols:
+        return  # Already migrated
+
+    # Remap old-style LLM category names in legacy text columns
+    for old, new in _OLD_CATEGORY_REMAP.items():
+        conn.execute("UPDATE llm_results SET category=? WHERE category=?", (new, old))
+        conn.execute(
+            "UPDATE skill_candidates SET category=? WHERE category=?", (new, old)
+        )
+        conn.execute(
+            "UPDATE skill_candidates SET llm_category=? WHERE llm_category=?",
+            (new, old),
+        )
+    # Rename legacy 'c' term to 'c language'
+    conn.execute("UPDATE skills SET term='c language' WHERE term='c'")
+    conn.commit()
+
+    # Populate categories from existing skills rows
+    conn.execute(
+        "INSERT OR IGNORE INTO categories(name) SELECT DISTINCT category FROM skills"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO categories(name) "
+        "SELECT DISTINCT category FROM llm_results"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO categories(name) "
+        "SELECT DISTINCT category FROM skill_candidates"
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO categories(name) "
+        "SELECT DISTINCT llm_category FROM skill_candidates"
+    )
+    conn.commit()
+
+    # Recreate skills with category_id
+    conn.executescript("""
+        CREATE TABLE skills_new (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            category_id INTEGER NOT NULL REFERENCES categories(id),
+            term        TEXT NOT NULL,
+            UNIQUE(category_id, term)
+        );
+        INSERT INTO skills_new(id, category_id, term)
+            SELECT s.id, c.id, s.term
+            FROM skills s
+            JOIN categories c ON c.name = s.category;
+        DROP TABLE skills;
+        ALTER TABLE skills_new RENAME TO skills;
+    """)
+
+    # Recreate llm_results with category_id
+    conn.executescript("""
+        CREATE TABLE llm_results_new (
+            url_key     TEXT NOT NULL,
+            url         TEXT NOT NULL,
+            category_id INTEGER NOT NULL REFERENCES categories(id),
+            skill       TEXT NOT NULL,
+            is_matched  INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (url_key, category_id, skill)
+        );
+        INSERT INTO llm_results_new(url_key, url, category_id, skill, is_matched)
+            SELECT r.url_key, r.url, c.id, r.skill,
+                   COALESCE(r.is_matched, 0)
+            FROM llm_results r
+            JOIN categories c ON c.name = r.category;
+        DROP TABLE llm_results;
+        ALTER TABLE llm_results_new RENAME TO llm_results;
+    """)
+
+    # Recreate skill_candidates with category_id + llm_category_id
+    conn.executescript("""
+        CREATE TABLE skill_candidates_new (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            term            TEXT NOT NULL,
+            category_id     INTEGER NOT NULL REFERENCES categories(id),
+            llm_category_id INTEGER NOT NULL REFERENCES categories(id),
+            jobs_count      INTEGER DEFAULT 0,
+            status          TEXT DEFAULT 'pending',
+            added_date      TEXT NOT NULL,
+            decided_date    TEXT,
+            UNIQUE(term, category_id)
+        );
+        INSERT INTO skill_candidates_new(
+            id, term, category_id, llm_category_id,
+            jobs_count, status, added_date, decided_date
+        )
+            SELECT sc.id, sc.term, c.id, lc.id,
+                   sc.jobs_count, sc.status, sc.added_date, sc.decided_date
+            FROM skill_candidates sc
+            JOIN categories c  ON c.name  = sc.category
+            JOIN categories lc ON lc.name = sc.llm_category;
+        DROP TABLE skill_candidates;
+        ALTER TABLE skill_candidates_new RENAME TO skill_candidates;
+    """)
+
+    conn.commit()
+    print("  [DB] Migrated to normalized category schema.")
+
+
 def load_skills(conn: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:
     """Load skills catalog from DB including aliases.
 
@@ -551,28 +637,28 @@ def load_skills(conn: sqlite3.Connection) -> dict[str, list[tuple[str, str]]]:
     """
     skills: dict[str, list[tuple[str, str]]] = {}
 
-    for row in conn.execute(
-        "SELECT id, category, term FROM skills ORDER BY category, id"
-    ):
+    for row in conn.execute("""
+        SELECT c.name AS category, s.id, s.term
+        FROM skills s
+        JOIN categories c ON s.category_id = c.id
+        ORDER BY c.name, s.id
+    """):
         display = row["term"]
         pattern = re.escape(display)
         skills.setdefault(row["category"], []).append((display, pattern))
 
     # Aliases — extra regex patterns that resolve to the canonical display term
     for row in conn.execute("""
-        SELECT s.category, s.term AS canonical_term, a.canonical AS alias_plain
+        SELECT c.name AS category, s.term AS canonical_term, a.canonical AS alias_plain
         FROM skill_aliases a
         JOIN skills s ON a.skill_id = s.id
+        JOIN categories c ON s.category_id = c.id
     """):
         display = row["canonical_term"]
         pattern = re.escape(row["alias_plain"])
         skills.setdefault(row["category"], []).append((display, pattern))
 
     return skills
-
-
-# Keep backward-compatible alias
-load_taxonomy = load_skills
 
 
 # ── Candidate pipeline ────────────────────────────────────────────────────────
@@ -597,20 +683,22 @@ def promote_llm_to_candidates(
     }
     known_terms = existing_skill_terms | existing_alias_terms
 
-    # Existing candidates keyed by (term, category) → current jobs_count
-    existing_candidates: dict[tuple[str, str], int] = {
-        (row["term"], row["category"]): row["jobs_count"]
+    # Existing candidates keyed by (term, category_id) → current jobs_count
+    existing_candidates: dict[tuple[str, int], int] = {
+        (row["term"], row["category_id"]): row["jobs_count"]
         for row in conn.execute(
-            "SELECT term, category, jobs_count FROM skill_candidates"
+            "SELECT term, category_id, jobs_count FROM skill_candidates"
         )
     }
 
     llm_rows = conn.execute(
         """
-        SELECT skill, category, COUNT(DISTINCT url_key) AS n
-        FROM llm_results
-        WHERE is_matched = 0
-        GROUP BY skill, category
+        SELECT r.skill, c.name AS category, r.category_id,
+               COUNT(DISTINCT r.url_key) AS n
+        FROM llm_results r
+        JOIN categories c ON r.category_id = c.id
+        WHERE r.is_matched = 0
+        GROUP BY r.skill, r.category_id
         HAVING n >= ?
         ORDER BY n DESC
     """,
@@ -622,7 +710,7 @@ def promote_llm_to_candidates(
 
     for llm_row in llm_rows:
         skill: str = llm_row["skill"]
-        llm_category: str = llm_row["category"]
+        category_id: int = llm_row["category_id"]
         jobs_count: int = llm_row["n"]
 
         normalized = normalize_term(skill)
@@ -633,22 +721,21 @@ def promote_llm_to_candidates(
         if normalized in known_terms:
             continue
 
-        target_category = resolve_category(llm_category, skill)
-        candidate_key = (normalized, target_category)
+        candidate_key = (normalized, category_id)
 
         if candidate_key in existing_candidates:
             if jobs_count > existing_candidates[candidate_key]:
                 conn.execute(
-                    "UPDATE skill_candidates SET jobs_count=? WHERE term=? AND category=?",
-                    (jobs_count, normalized, target_category),
+                    "UPDATE skill_candidates SET jobs_count=? WHERE term=? AND category_id=?",
+                    (jobs_count, normalized, category_id),
                 )
                 updated_count += 1
         else:
             conn.execute(
                 """INSERT OR IGNORE INTO skill_candidates
-                   (term, category, llm_category, jobs_count, added_date)
+                   (term, category_id, llm_category_id, jobs_count, added_date)
                    VALUES (?,?,?,?,?)""",
-                (normalized, target_category, llm_category, jobs_count, today),
+                (normalized, category_id, category_id, jobs_count, today),
             )
             newly_added_count += 1
             existing_candidates[candidate_key] = jobs_count
@@ -671,10 +758,11 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
     Returns the number of terms promoted.
     """
     candidate_rows = conn.execute(
-        """SELECT term, category, jobs_count
-           FROM skill_candidates
-           WHERE status='pending' AND jobs_count >= ?
-           ORDER BY jobs_count DESC""",
+        """SELECT sc.term, c.name AS category, sc.category_id, sc.jobs_count
+           FROM skill_candidates sc
+           JOIN categories c ON sc.category_id = c.id
+           WHERE sc.status='pending' AND sc.jobs_count >= ?
+           ORDER BY sc.jobs_count DESC""",
         (min_jobs,),
     ).fetchall()
 
@@ -691,14 +779,14 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
     for row in candidate_rows:
         print(f"  {row['term']:<28} {row['category']:<32} {row['jobs_count']}")
         conn.execute(
-            "INSERT OR IGNORE INTO skills(category, term) VALUES (?,?)",
-            (row["category"], row["term"]),
+            "INSERT OR IGNORE INTO skills(category_id, term) VALUES (?,?)",
+            (row["category_id"], row["term"]),
         )
         conn.execute(
             """UPDATE skill_candidates
                SET status='approved', decided_date=?
-               WHERE term=? AND category=?""",
-            (today, row["term"], row["category"]),
+               WHERE term=? AND category_id=?""",
+            (today, row["term"], row["category_id"]),
         )
 
     conn.commit()
@@ -708,11 +796,14 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
 def print_candidates(conn: sqlite3.Connection) -> None:
     """Print the skill_candidates queue grouped by status."""
     rows = conn.execute(
-        """SELECT term, category, llm_category, jobs_count, status
-           FROM skill_candidates
+        """SELECT sc.term, c.name AS category, lc.name AS llm_category,
+                  sc.jobs_count, sc.status
+           FROM skill_candidates sc
+           JOIN categories c  ON sc.category_id     = c.id
+           JOIN categories lc ON sc.llm_category_id = lc.id
            ORDER BY
-               CASE status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END,
-               jobs_count DESC"""
+               CASE sc.status WHEN 'pending' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END,
+               sc.jobs_count DESC"""
     ).fetchall()
 
     if not rows:
@@ -776,7 +867,7 @@ KNOWN SKILLS:
 
 TASK: Analyze the job description and:
 1. List ALL known skill terms that are mentioned or clearly implied. Use the EXACT term from the catalog — do not paraphrase.
-2. List any genuinely NEW technical skills/tools/protocols NOT in the catalog. For each, suggest the best-fit category from: {categories_block}.
+2. List any genuinely NEW technical skills/tools/protocols NOT in the catalog. For each, use the EXACT category name from this list — copy verbatim: {categories_block}.
 
 Return ONLY JSON:
 {{
@@ -808,7 +899,10 @@ def _llm_cache_get(
     to maintain internal API compatibility with _build_comprehensive_by_category.
     """
     rows = conn.execute(
-        "SELECT category, skill, is_matched FROM llm_results WHERE url_key = ?",
+        """SELECT c.name AS category, r.skill, r.is_matched
+           FROM llm_results r
+           JOIN categories c ON r.category_id = c.id
+           WHERE r.url_key = ?""",
         (url_key,),
     ).fetchall()
     if not rows:
@@ -833,24 +927,30 @@ def _llm_cache_set(
     Entries under '_matched' key are stored with is_matched=1 and their actual
     skills-catalog category looked up from the skills table.
     """
-    cache_rows: list[tuple] = []
     for category, skills in result.items():
         is_matched = 1 if category == "_matched" else 0
         for skill in skills:
             if is_matched:
-                # Look up the actual category from the skills table
+                # Look up category_id from the skills table via join
                 row = conn.execute(
-                    "SELECT category FROM skills WHERE term = ?",
+                    """SELECT s.category_id FROM skills s WHERE s.term = ?""",
                     (skill.lower(),),
                 ).fetchone()
-                actual_cat = row["category"] if row else "Unknown"
-                cache_rows.append((url_key, url, actual_cat, skill, 1))
+                if row is None:
+                    continue
+                cat_id = row["category_id"]
             else:
-                cache_rows.append((url_key, url, category, skill, 0))
-    conn.executemany(
-        "INSERT OR IGNORE INTO llm_results(url_key, url, category, skill, is_matched) VALUES(?,?,?,?,?)",
-        cache_rows,
-    )
+                row = conn.execute(
+                    "SELECT id FROM categories WHERE name = ?", (category,)
+                ).fetchone()
+                if row is None:
+                    continue
+                cat_id = row["id"]
+            conn.execute(
+                "INSERT OR IGNORE INTO llm_results"
+                "(url_key, url, category_id, skill, is_matched) VALUES(?,?,?,?,?)",
+                (url_key, url, cat_id, skill, is_matched),
+            )
     conn.commit()
 
 
@@ -1334,9 +1434,7 @@ def _print_missing_skill_terms(
         f"{len(actionable_missing)} terms"
     )
 
-    for skill, count in skills_missing.most_common(
-        _REPORT_TOP_MISSING_SKILLS_COUNT
-    ):
+    for skill, count in skills_missing.most_common(_REPORT_TOP_MISSING_SKILLS_COUNT):
         print(f"  {skill:<{_REPORT_SKILL_WIDTH}} {count} jobs")
 
     if actionable_missing:
@@ -1597,8 +1695,7 @@ def main() -> None:
             promote_llm_to_candidates(conn, threshold=LLM_CANDIDATE_THRESHOLD)
 
         existing_candidate_terms = {
-            row["term"]
-            for row in conn.execute("SELECT term FROM skill_candidates")
+            row["term"] for row in conn.execute("SELECT term FROM skill_candidates")
         }
     finally:
         conn.close()
