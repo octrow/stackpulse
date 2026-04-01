@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -h "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+VENV_DIR="${STACKPULSE_VENV:-$SCRIPT_DIR/.venv}"
+VENV_PY="$VENV_DIR/bin/python"
+
+create_venv() {
+  if [[ ! -x "$VENV_PY" ]]; then
+    echo "[stackpulse] creating virtual environment: $VENV_DIR"
+    python3 -m venv "$VENV_DIR"
+  fi
+}
+
+ensure_deps() {
+  if ! "$VENV_PY" -c "import linkedin_scraper, playwright, dotenv, pandas, openpyxl, openai, typer, rich" >/dev/null 2>&1; then
+    echo "[stackpulse] installing dependencies"
+    "$VENV_PY" -m pip install -r "$SCRIPT_DIR/requirements.txt"
+  fi
+}
+
+ensure_chromium() {
+  if [[ ! -d "$HOME/.cache/ms-playwright" ]] || ! compgen -G "$HOME/.cache/ms-playwright/chromium-*" > /dev/null; then
+    echo "[stackpulse] installing Playwright Chromium"
+    "$VENV_PY" -m playwright install chromium
+  fi
+}
+
+create_venv
+ensure_deps
+ensure_chromium
+
+exec "$VENV_PY" "$SCRIPT_DIR/cli.py" "$@"
