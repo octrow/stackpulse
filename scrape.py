@@ -37,12 +37,7 @@ from config import (
     SESSION_FILE,
 )
 from job_scraper_direct import scrape_job
-from analysis_db import (
-    open_db,
-    init_db,
-    load_scraped_job_keys,
-    upsert_scraped_job_key,
-)
+from analysis_db import open_db, init_db, load_scraped_job_keys, upsert_scraped_job_key
 
 
 # ── Logging setup ─────────────────────────────────────────────────────────────
@@ -104,27 +99,6 @@ def canonical_url_key(url: str | None) -> str | None:
         host = "linkedin.com"
 
     return f"{host}{path}" if path else host
-
-
-def load_json_scraped_url_keys() -> set[str]:
-    """Return canonical URL keys from all historical jobs_*.json files."""
-    data_dir = Path(OUTPUT_DIR)
-    seen_keys: set[str] = set()
-    for json_file in sorted(data_dir.glob("jobs_*.json")):
-        try:
-            jobs = json.loads(json_file.read_text(encoding="utf-8"))
-            for job in jobs:
-                key = canonical_url_key(job.get("linkedin_url"))
-                if key:
-                    seen_keys.add(key)
-        except (OSError, JSONDecodeError, TypeError) as error:
-            log.warning(
-                "Could not read %s (%s): %s",
-                json_file,
-                type(error).__name__,
-                error,
-            )
-    return seen_keys
 
 
 def _open_scrape_db() -> sqlite3.Connection:
@@ -334,7 +308,6 @@ async def _scrape_query_urls(
     location: str,
     scraped_date: str,
     conn: sqlite3.Connection,
-    fresh: bool,
     authentication_error_cls: type[Exception],
 ) -> tuple[int, int, bool]:
     """Scrape all URLs for one query and return counts + early-stop signal."""
@@ -364,6 +337,17 @@ async def _scrape_query_urls(
         all_jobs.append(job_dict)
         jobs_scraped_count += 1
         save_jobs(all_jobs, output_file)
+
+        key = canonical_url_key(url)
+        if key:
+            upsert_scraped_job_key(
+                conn,
+                key,
+                url,
+                datetime.now().isoformat(timespec="seconds"),
+            )
+            seen_keys.add(key)
+
         await asyncio.sleep(DELAY_BETWEEN_JOBS)
 
     return jobs_scraped_count, jobs_failed_count, False
@@ -405,90 +389,102 @@ async def scrape_all(limit_per_query: int, fresh: bool) -> None:
     )
     _ensure_session_file()
 
-    today = date.today().isoformat()
-    output_file = Path(OUTPUT_DIR) / f"jobs_{today}.json"
-    seen_urls, all_jobs = _initialise_scrape_state(output_file, fresh)
+    conn = _open_scrape_db()
+    try:
+        today = date.today().isoformat()
+        output_file = Path(OUTPUT_DIR) / f"jobs_{today}.json"
+        seen_keys, all_jobs = _initialise_scrape_state(output_file, fresh, conn)
 
-    total_queries = len(SEARCH_QUERIES)
-    jobs_scraped_count = 0
-    jobs_failed_count = 0
-    start_time = datetime.now()
+        total_queries = len(SEARCH_QUERIES)
+        jobs_scraped_count = 0
+        jobs_failed_count = 0
+        start_time = datetime.now()
 
-    log.info(
-        "Starting scrape — %s queries, limit=%s each", total_queries, limit_per_query
-    )
+        log.info(
+            "Starting scrape — %s queries, limit=%s each",
+            total_queries,
+            limit_per_query,
+        )
 
-    _interrupted = False
+        _interrupted = False
 
-    async with browser_manager_cls(headless=True) as browser:
-        await browser.load_session(SESSION_FILE)
-        search_scraper = job_search_scraper_cls(browser.page)
+        async with browser_manager_cls(headless=True) as browser:
+            await browser.load_session(SESSION_FILE)
+            search_scraper = job_search_scraper_cls(browser.page)
 
-        try:
-            for query_index, (keywords, location) in enumerate(SEARCH_QUERIES, 1):
+            try:
+                for query_index, (keywords, location) in enumerate(SEARCH_QUERIES, 1):
+                    log.info(
+                        "[%s/%s] Searching '%s' in '%s'",
+                        query_index,
+                        total_queries,
+                        keywords,
+                        location,
+                    )
+
+                    job_urls, should_stop = await _search_query_urls(
+                        search_scraper,
+                        keywords,
+                        location,
+                        limit_per_query,
+                        authentication_error_cls,
+                    )
+                    if should_stop:
+                        break
+                    if not job_urls:
+                        continue
+
+                    new_urls = [
+                        url
+                        for url in job_urls
+                        if canonical_url_key(url) not in seen_keys
+                    ]
+                    skipped_count = len(job_urls) - len(new_urls)
+                    log.info(
+                        "  → %s results, %s new (skipping %s already scraped)",
+                        len(job_urls),
+                        len(new_urls),
+                        skipped_count,
+                    )
+
+                    (
+                        query_scraped_count,
+                        query_failed_count,
+                        should_stop,
+                    ) = await _scrape_query_urls(
+                        browser.page,
+                        new_urls,
+                        seen_keys,
+                        all_jobs,
+                        output_file,
+                        keywords,
+                        location,
+                        today,
+                        conn,
+                        authentication_error_cls,
+                    )
+                    jobs_scraped_count += query_scraped_count
+                    jobs_failed_count += query_failed_count
+                    if should_stop:
+                        return
+
+                    await asyncio.sleep(DELAY_BETWEEN_QUERIES)
+            except (KeyboardInterrupt, asyncio.CancelledError):
                 log.info(
-                    "[%s/%s] Searching '%s' in '%s'",
-                    query_index,
-                    total_queries,
-                    keywords,
-                    location,
+                    "Scrape interrupted — saving %d jobs collected so far.",
+                    len(all_jobs),
                 )
+                _interrupted = True
+                # Do not re-raise: lets async with __aexit__ close the browser cleanly
 
-                job_urls, should_stop = await _search_query_urls(
-                    search_scraper,
-                    keywords,
-                    location,
-                    limit_per_query,
-                    authentication_error_cls,
-                )
-                if should_stop:
-                    break
-                if not job_urls:
-                    continue
+        _log_run_summary(
+            start_time, jobs_scraped_count, jobs_failed_count, all_jobs, output_file
+        )
 
-                new_urls = [url for url in job_urls if url not in seen_urls]
-                skipped_count = len(job_urls) - len(new_urls)
-                log.info(
-                    "  → %s results, %s new (skipping %s already scraped)",
-                    len(job_urls),
-                    len(new_urls),
-                    skipped_count,
-                )
-
-                (
-                    query_scraped_count,
-                    query_failed_count,
-                    should_stop,
-                ) = await _scrape_query_urls(
-                    browser.page,
-                    new_urls,
-                    seen_urls,
-                    all_jobs,
-                    output_file,
-                    keywords,
-                    location,
-                    today,
-                    authentication_error_cls,
-                )
-                jobs_scraped_count += query_scraped_count
-                jobs_failed_count += query_failed_count
-                if should_stop:
-                    return
-
-                await asyncio.sleep(DELAY_BETWEEN_QUERIES)
-        except (KeyboardInterrupt, asyncio.CancelledError):
-            log.info(
-                "Scrape interrupted — saving %d jobs collected so far.", len(all_jobs)
-            )
-            _interrupted = True
-            # Do not re-raise: lets async with __aexit__ close the browser cleanly
-
-    _log_run_summary(
-        start_time, jobs_scraped_count, jobs_failed_count, all_jobs, output_file
-    )
-
-    if _interrupted:
-        raise KeyboardInterrupt
+        if _interrupted:
+            raise KeyboardInterrupt
+    finally:
+        conn.close()
 
 
 def main() -> None:

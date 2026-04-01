@@ -25,7 +25,7 @@ stackpulse/
 └── data/
     ├── jobs_YYYY-MM-DD.json        # one file per scrape day
     ├── jobs_*_analysis.xlsx        # Excel export with one column per skill category
-    ├── skills.db                   # SQLite: skills catalog + LLM extraction cache
+    ├── skills.db                   # SQLite: skills catalog + LLM cache + scrape dedupe ledger
     ├── scraper.log                 # timestamped run log
     └── debug/                      # screenshots + HTML dumped when a page fails to load
 ```
@@ -136,12 +136,16 @@ stackpulse scrape --limit 3
 stackpulse scrape --fresh
 ```
 
-**Resume is automatic** — on every run the scraper loads all previously collected URLs from every `data/jobs_*.json`
-file and skips them. No flag needed.
+**Resume is automatic** — on every run the scraper loads previously scraped job keys from `data/skills.db`
+(table `scraped_jobs`) and skips them. Existing historical `data/jobs_*.json` files are backfilled once into the DB
+when the ledger is empty. No flag needed.
 
 **Ctrl+C exits cleanly** — progress is saved after every job. Re-run at any time to pick up where you left off.
 
 Output is saved incrementally after each job to `data/jobs_YYYY-MM-DD.json`.
+
+Deduplication key is canonicalized per URL (LinkedIn job ID when available; otherwise normalized URL path), and
+persisted in `skills.db` so the same posting is skipped across days even if URL query params differ.
 
 ### 3. Analyze skills
 
@@ -317,7 +321,9 @@ runs.
 
 17 categories, 227+ terms, stored in `data/skills.db` (SQLite). The DB is auto-created and seeded from `SKILLS_SEED` in
 `analyze.py` on first run. Terms are stored as plain lowercase text; regex escaping is applied at load time only.
-Additional terms accumulate automatically via the LLM promotion pipeline.
+Additional terms accumulate automatically via the LLM promotion pipeline. The same DB also stores `scraped_jobs`, used
+by
+`scrape.py` as the persistent dedupe ledger across daily JSON outputs.
 
 | Category                   | Examples                                                 |
 |----------------------------|----------------------------------------------------------|

@@ -93,7 +93,8 @@ appears, it dumps a screenshot and HTML snippet to `OUTPUT_DIR/debug/<job_id>.*`
 
 `scrape.py` is now intentionally split into small orchestration helpers (`_search_query_urls`, `_scrape_query_urls`,
 `_log_run_summary`, etc.) to keep `scrape_all()` readable while preserving auto-resume and save-after-each-job
-semantics.
+semantics. Dedupe uses canonical URL keys (LinkedIn job ID when available, otherwise normalized URL path) and persists
+successful scrapes into `scraped_jobs`.
 
 ## Data flow
 
@@ -125,13 +126,16 @@ config.py (queries + timeouts + paths + LLM settings)
   queue; both FK → `categories`. `status` is `pending` / `approved` / `rejected`.
 - `skill_aliases(skill_id, alias, canonical, lang, alias_type)` — synonyms and multilingual variants for existing
   skills; seeded with `python3`/`python 3`
+- `scraped_jobs(url_key, linkedin_url, first_scraped_at, last_scraped_at)` — persistent scraper dedupe ledger;
+  `url_key` is canonicalized from LinkedIn URL/job ID and used by `scrape.py` skip logic
 
 The LLM prompt instructs the model to use exact `categories.name` values for `new_terms[].category`. No mapping
 layer needed — `_migrate_schema()` handles old-format rows on existing DBs.
 
 ## Key design decisions
 
-**Auto-resume**: `scrape.py` always loads all URLs from every `data/jobs_*.json` on startup and skips them. There is no
+**Auto-resume**: `scrape.py` loads canonical URL keys from `scraped_jobs` in `data/skills.db` on startup and skips
+already-scraped postings. If the ledger is empty, it backfills once from historical `data/jobs_*.json`. There is no
 separate resume flag — use `--fresh` to override.
 
 **Incremental save**: `save_jobs()` overwrites the output file after every single job. Safe to `Ctrl+C` at any time.
