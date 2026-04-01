@@ -14,8 +14,85 @@ from rich.traceback import install as install_rich_traceback
 
 install_rich_traceback(show_locals=False)
 
-app = typer.Typer(help="StackPulse CLI")
+app = typer.Typer(help="StackPulse CLI", invoke_without_command=True)
 console = Console()
+
+
+@app.callback(invoke_without_command=True)
+def _default(ctx: typer.Context) -> None:
+    """Run interactive wizard when no subcommand is given."""
+    if ctx.invoked_subcommand is None:
+        _interactive_wizard()
+
+
+def _interactive_wizard() -> None:
+    """Prompt the user for what to run when stackpulse is called with no args."""
+    console.print("\n[bold cyan]StackPulse[/bold cyan] — what would you like to do?\n")
+    console.print("  1  analyze        Analyze scraped jobs and export stats")
+    console.print("  2  scrape         Scrape LinkedIn for new jobs")
+    console.print("  3  auto           Bootstrap + scrape + analyze end-to-end")
+    console.print("  4  setup-session  Create or refresh LinkedIn session")
+    console.print("  5  quit\n")
+
+    choice = typer.prompt("Choice [1-5]", default="1")
+
+    if choice == "5" or choice.lower() == "quit":
+        raise typer.Exit()
+
+    if choice == "2":
+        limit_str = typer.prompt(
+            "Max jobs per query (leave empty for config default)", default=""
+        )
+        limit = int(limit_str) if limit_str.strip().isdigit() else None
+        fresh = typer.confirm(
+            "Ignore previously scraped URLs (--fresh)?", default=False
+        )
+        scrape(limit=limit, fresh=fresh)
+
+    elif choice == "3":
+        limit_str = typer.prompt(
+            "Max jobs per query (leave empty for config default)", default=""
+        )
+        limit = int(limit_str) if limit_str.strip().isdigit() else None
+        fresh = typer.confirm(
+            "Ignore previously scraped URLs (--fresh)?", default=False
+        )
+        all_files = typer.confirm("Analyze all jobs files (--all)?", default=True)
+        llm = typer.confirm("Enable LLM extraction (--llm)?", default=False)
+        auto(
+            limit=limit,
+            fresh=fresh,
+            all_files=all_files,
+            llm=llm,
+            promote=None,
+            venv=Path(".venv"),
+            python=sys.executable,
+        )
+
+    elif choice == "4":
+        setup_session_command()
+
+    else:
+        # Default: analyze
+        all_files = typer.confirm("Analyze all jobs files (--all)?", default=True)
+        llm = typer.confirm("Enable LLM extraction (--llm)?", default=False)
+        title_raw = typer.prompt(
+            "Filter by title contains (leave empty to skip)", default=""
+        )
+        location_raw = typer.prompt(
+            "Filter by location contains (leave empty to skip)", default=""
+        )
+        title_contains = title_raw.strip() or None
+        location_contains = location_raw.strip() or None
+        analyze(
+            file=None,
+            all_files=all_files,
+            llm=llm,
+            promote=None,
+            candidates=False,
+            title_contains=title_contains,
+            location_contains=location_contains,
+        )
 
 
 def _repo_root() -> Path:
@@ -126,6 +203,16 @@ def analyze(
         "--candidates",
         help="Show taxonomy candidates queue and exit",
     ),
+    title_contains: Optional[str] = typer.Option(
+        None,
+        "--title-contains",
+        help="Only analyze jobs whose title contains this string (case-insensitive)",
+    ),
+    location_contains: Optional[str] = typer.Option(
+        None,
+        "--location-contains",
+        help="Only analyze jobs whose location contains this string (case-insensitive)",
+    ),
 ) -> None:
     """Analyze scraped jobs and export Excel output."""
     if file and all_files:
@@ -172,6 +259,23 @@ def analyze(
         jobs = analyzer.load_jobs(paths)
         console.print(f"Loaded {len(jobs)} unique jobs.")
 
+        if title_contains:
+            jobs = [
+                j
+                for j in jobs
+                if title_contains.lower() in (j.get("job_title") or "").lower()
+            ]
+            console.print(f"After title filter '{title_contains}': {len(jobs)} jobs")
+        if location_contains:
+            jobs = [
+                j
+                for j in jobs
+                if location_contains.lower() in (j.get("location") or "").lower()
+            ]
+            console.print(
+                f"After location filter '{location_contains}': {len(jobs)} jobs"
+            )
+
         if not jobs:
             conn.close()
             return
@@ -188,8 +292,14 @@ def analyze(
         if llm and llm_client:
             analyzer.promote_llm_to_candidates(conn, threshold=2)
 
+        existing_candidate_canonicals = {
+            row[0] for row in conn.execute("SELECT canonical FROM taxonomy_candidates")
+        }
+        candidate_threshold = 2
         conn.close()
-        analyzer.print_report(df, taxonomy)
+        analyzer.print_report(
+            df, taxonomy, existing_candidate_canonicals, candidate_threshold
+        )
 
         output_stem = paths[0].stem if len(paths) == 1 else "jobs_all"
         analyzer.save_excel(df, data_dir / f"{output_stem}_analysis.xlsx", taxonomy)

@@ -52,11 +52,28 @@ pip install -e .
 
 ## CLI (Typer + Rich)
 
+Running `stackpulse` with no arguments launches an **interactive wizard** that prompts for command and options:
+
+```
+StackPulse — what would you like to do?
+
+  1  analyze        Analyze scraped jobs and export stats
+  2  scrape         Scrape LinkedIn for new jobs
+  3  auto           Bootstrap + scrape + analyze end-to-end
+  4  setup-session  Create or refresh LinkedIn session
+  5  quit
+
+Choice [1-5]:
+```
+
+All subcommands still work non-interactively via flags:
+
 ```bash
 stackpulse --help
 stackpulse setup-session
 stackpulse scrape --limit 3
 stackpulse analyze --all --llm
+stackpulse analyze --all --title-contains "Backend" --location-contains "Berlin"
 stackpulse analyze --candidates
 ```
 
@@ -77,6 +94,17 @@ stackpulse auto --llm --promote 2
 - Fails fast on the first failed step and prints a Rich summary table
 
 You can still run legacy script entrypoints (`py setup_session.py`, `py scrape.py`, `py analyze.py`).
+
+### Shell completion
+
+Requires `pip install -e .` first (adds `stackpulse` to `$PATH`).
+
+```bash
+stackpulse --install-completion   # install tab completion for your current shell
+stackpulse --show-completion      # print the completion script (for manual setup)
+```
+
+Restart your shell (or `source ~/.zshrc` / `~/.bashrc`) after installing.
 
 ---
 
@@ -109,7 +137,9 @@ stackpulse scrape --fresh
 ```
 
 **Resume is automatic** — on every run the scraper loads all previously collected URLs from every `data/jobs_*.json`
-file and skips them. No flag needed. You can `Ctrl+C` at any time and re-run safely.
+file and skips them. No flag needed.
+
+**Ctrl+C exits cleanly** — progress is saved after every job. Re-run at any time to pick up where you left off.
 
 Output is saved incrementally after each job to `data/jobs_YYYY-MM-DD.json`.
 
@@ -126,11 +156,28 @@ py analyze.py --all --llm
 stackpulse analyze
 stackpulse analyze --file data/jobs_2026-04-01.json
 stackpulse analyze --all
-stackpulse analyze --llm
+stackpulse analyze --llm          # note: double-dash required; -llm and "analyze llm" are invalid
 stackpulse analyze --all --llm
+
+# Cohort filters (case-insensitive substring match)
+stackpulse analyze --all --title-contains "Backend"
+stackpulse analyze --all --location-contains "Berlin"
+stackpulse analyze --all --llm --title-contains "Senior" --location-contains "Germany"
 ```
 
 Prints a skill frequency table to stdout and saves `data/jobs_*_analysis.xlsx` with one column per skill category.
+
+**Report sections:**
+
+| Section            | Description                                                                       |
+|--------------------|-----------------------------------------------------------------------------------|
+| Extraction quality | Jobs with empty description and jobs with zero skills extracted (%)               |
+| Top skills         | Frequency + prevalence % + bar; uses merged regex+LLM metric when `--llm` was run |
+| By category        | Top terms per taxonomy category with prevalence %                                 |
+| Top locations      | Most frequent scraped `location` values                                           |
+| Skills by location | Top 3 skills per `search_location` (only shown when >1 search location present)   |
+| Salary hints       | Postings where a salary pattern was regex-extracted                               |
+| LLM extras         | LLM-discovered terms beyond taxonomy coverage (only with `--llm`)                 |
 
 `--llm` mode calls `NINEROUTER_MODEL` through your local 9router endpoint (`NINEROUTER_BASE_URL`, default
 `http://localhost:20128/v1`) to extract skills that fall outside the fixed taxonomy. Results are cached in

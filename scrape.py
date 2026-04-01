@@ -295,6 +295,16 @@ def _log_run_summary(
         jobs_failed_count,
         len(all_jobs),
     )
+    if all_jobs:
+        missing_desc = sum(1 for j in all_jobs if not j.get("job_description"))
+        missing_title = sum(1 for j in all_jobs if not j.get("job_title"))
+        missing_loc = sum(1 for j in all_jobs if not j.get("location"))
+        log.info(
+            "Field coverage — missing description: %s, missing title: %s, missing location: %s",
+            missing_desc,
+            missing_title,
+            missing_loc,
+        )
     log.info("Output: %s", output_file.resolve())
 
 

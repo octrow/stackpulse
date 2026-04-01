@@ -224,7 +224,11 @@ async def _get_location(page: Page) -> str | None:
 
     def _is_location(text: str) -> bool:
         return 3 < len(text) < 80 and (
-            "," in text or "Remote" in text or "Hybrid" in text
+            "," in text
+            or "Remote" in text
+            or "Hybrid" in text
+            or "On-site" in text
+            or any(c.isupper() for c in text)
         )
 
     return await _find_text_matching(page, _LOCATION_SELECTORS, _is_location)

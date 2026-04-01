@@ -1030,6 +1030,14 @@ def analyze(
         if llm_client and conn is not None:
             llm_skills = extract_skills_llm(combined_text, url, conn, llm_client)
 
+        regex_skills_flat = [skill for hits in skills_found.values() for skill in hits]
+        llm_skills_flat = [skill for skills in llm_skills.values() for skill in skills]
+        seen_lower: set[str] = {s.lower() for s in regex_skills_flat}
+        comprehensive_extra = [
+            s for s in llm_skills_flat if s.lower() not in seen_lower
+        ]
+        all_skills_comprehensive = regex_skills_flat + comprehensive_extra
+
         job_rows.append(
             {
                 "job_title": job.get("job_title"),
@@ -1042,10 +1050,10 @@ def analyze(
                 "scraped_date": job.get("scraped_date"),
                 "applicant_count": job.get("applicant_count"),
                 "skills_raw": skills_found,
-                "all_skills_flat": [
-                    skill for hits in skills_found.values() for skill in hits
-                ],
+                "all_skills_flat": regex_skills_flat,
+                "all_skills_comprehensive": all_skills_comprehensive,
                 "skills_llm": llm_skills,
+                "has_description": bool(description.strip()),
             }
         )
 
@@ -1053,12 +1061,25 @@ def analyze(
 
 
 def _print_top_skills(df: pd.DataFrame) -> None:
-    """Print top skill frequencies across all postings."""
+    """Print top skill frequencies across all postings.
+
+    Uses the comprehensive column (regex + LLM merged) when available.
+    """
+    col = (
+        "all_skills_comprehensive"
+        if "all_skills_comprehensive" in df.columns
+        else "all_skills_flat"
+    )
     all_skills: Counter = Counter()
-    for skills_list in df["all_skills_flat"]:
+    for skills_list in df[col]:
         all_skills.update(skills_list)
 
-    print(f"\nTop {_REPORT_TOP_SKILLS_COUNT} skills mentioned across all postings:")
+    label = (
+        "comprehensive (regex + LLM)"
+        if col == "all_skills_comprehensive"
+        else "regex taxonomy"
+    )
+    print(f"\nTop {_REPORT_TOP_SKILLS_COUNT} skills [{label}] across all postings:")
     for skill, count in all_skills.most_common(_REPORT_TOP_SKILLS_COUNT):
         percentage = count / len(df) * 100
         percentage_bar = "█" * int(percentage / 2)
@@ -1083,8 +1104,9 @@ def _print_category_breakdown(
         if not category_counter:
             continue
 
+        total_jobs = len(df)
         top_terms = ", ".join(
-            f"{term}({count})"
+            f"{term}({count}, {count / total_jobs * 100:.0f}%)"
             for term, count in category_counter.most_common(
                 _REPORT_TOP_CATEGORIES_COUNT
             )
@@ -1248,6 +1270,38 @@ def _print_llm_section(
     )
 
 
+def _print_quality_summary(df: pd.DataFrame) -> None:
+    """Print extraction quality counters."""
+    total = len(df)
+    no_desc = (~df["has_description"]).sum() if "has_description" in df.columns else 0
+    no_skills = (df["all_skills_flat"].apply(len) == 0).sum()
+    print(f"\nExtraction quality ({total} jobs):")
+    print(f"  Empty description  : {no_desc:>4} ({no_desc / total * 100:.1f}%)")
+    print(f"  Zero skills found  : {no_skills:>4} ({no_skills / total * 100:.1f}%)")
+
+
+def _print_skills_by_location(df: pd.DataFrame) -> None:
+    """Print top 3 skills per unique search_location."""
+    if "search_location" not in df.columns:
+        return
+    locations = df["search_location"].dropna().unique()
+    if len(locations) <= 1:
+        return
+    col = (
+        "all_skills_comprehensive"
+        if "all_skills_comprehensive" in df.columns
+        else "all_skills_flat"
+    )
+    print("\nTop skills by search location:")
+    for loc in sorted(locations):
+        subset = df[df["search_location"] == loc]
+        counter: Counter = Counter()
+        for skills_list in subset[col]:
+            counter.update(skills_list)
+        top = ", ".join(f"{s}({c})" for s, c in counter.most_common(3))
+        print(f"  {str(loc):<30} {top}")
+
+
 def print_report(
     df: pd.DataFrame,
     taxonomy: dict[str, list[tuple[str, str]]],
@@ -1259,9 +1313,11 @@ def print_report(
     print(f"SKILLS ANALYSIS — {len(df)} unique job postings")
     print(f"{'=' * 60}")
 
+    _print_quality_summary(df)
     _print_top_skills(df)
     _print_category_breakdown(df, taxonomy)
     _print_top_locations(df)
+    _print_skills_by_location(df)
     _print_salary_hints(df)
     _print_llm_section(df, taxonomy, existing_candidate_canonicals, candidate_threshold)
 
@@ -1272,7 +1328,13 @@ def save_excel(
     taxonomy: dict[str, list[tuple[str, str]]],
 ) -> None:
     """Export the analysis DataFrame to Excel with one column per skill category."""
-    internal_columns = ["skills_raw", "all_skills_flat", "skills_llm"]
+    internal_columns = [
+        "skills_raw",
+        "all_skills_flat",
+        "all_skills_comprehensive",
+        "skills_llm",
+        "has_description",
+    ]
     export_df = df.drop(columns=[col for col in internal_columns if col in df.columns])
 
     for category in taxonomy:

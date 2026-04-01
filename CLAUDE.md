@@ -13,11 +13,13 @@ playwright install chromium
 pip install -e .
 
 # Typer + Rich CLI
+stackpulse                              # interactive wizard (no-args default)
 stackpulse --help
 stackpulse setup-session
 stackpulse scrape --limit 3
 stackpulse scrape --fresh
 stackpulse analyze --all --llm
+stackpulse analyze --all --title-contains "Backend" --location-contains "Berlin"
 stackpulse analyze --candidates
 stackpulse auto --limit 3 --all
 
@@ -54,9 +56,10 @@ Legacy script commands remain valid and are used by the CLI internally.
 ## CLI architecture
 
 `cli.py` is a thin Typer + Rich wrapper over existing module logic:
+- no-args invocation → `_interactive_wizard()` (prompts for command + options, then calls the function directly)
 - `setup-session` → `setup_session.main()`
 - `scrape` → `scrape.scrape_all()`
-- `analyze` → same workflow as `analyze.py main()` using existing helper functions
+- `analyze` → same workflow as `analyze.py main()` using existing helper functions; cohort filters (`--title-contains`, `--location-contains`) applied after `load_jobs()` before `analyze()`
 - `auto` → orchestrates venv/bootstrap/session/scrape/analyze sequence
 
 Prefer reusing script-level functions and keep behavior parity with existing entrypoints.
@@ -116,6 +119,12 @@ config.py (queries + timeouts + paths + LLM settings)
 **LLM 429 / rate-limit handling**: `extract_skills_llm()` uses `_call_llm_with_retry()` and `_extract_skills_with_models()` to keep retry/fallback logic isolated. It parses suggested wait from the error message (supports `"try again in ..."` and `"reset after ..."`). If wait ≤ `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` (default 30s), it sleeps and retries once. For longer waits (daily quota exhaustion), it falls back to `NINEROUTER_FALLBACK_MODEL`.
 
 **`SKIP_TERMS`**: generic noise terms (`api`, `testing`, `automation`, etc.) that are blacklisted from entering `taxonomy_candidates`.
+
+**Comprehensive skills metric**: when `--llm` is used, `analyze()` builds `all_skills_comprehensive` per job — regex taxonomy hits plus LLM-discovered terms not already in the regex set (deduped by lowercase canonical). `_print_top_skills` uses this column automatically; `all_skills_flat` (regex-only) is preserved for backward-compatible Excel export columns.
+
+**Report additions**: `print_report` now calls `_print_quality_summary` (empty-description + zero-skill-job counts) and `_print_skills_by_location` (top 3 skills per unique `search_location`, skipped when ≤1 location). Category breakdown includes prevalence % per top term.
+
+**Field coverage logging**: `_log_run_summary` logs counts of jobs missing `job_description`, `job_title`, and `location` at end of each scrape run (visible in `data/scraper.log`).
 
 ## Selector debugging
 
