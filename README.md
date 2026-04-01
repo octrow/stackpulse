@@ -173,23 +173,23 @@ Prints a skill frequency table to stdout and saves `data/jobs_*_analysis.xlsx` w
 |--------------------|-----------------------------------------------------------------------------------|
 | Extraction quality | Jobs with empty description and jobs with zero skills extracted (%)               |
 | Top skills         | Frequency + prevalence % + bar; uses merged regex+LLM metric when `--llm` was run |
-| By category        | Top terms per taxonomy category with prevalence %                                 |
+| By category        | Top terms per taxonomy category with prevalence % (regex + LLM unified)           |
 | Top locations      | Most frequent scraped `location` values                                           |
 | Skills by location | Top 3 skills per `search_location` (only shown when >1 search location present)   |
-| Salary hints       | Postings where a salary pattern was regex-extracted                               |
-| LLM extras         | LLM-discovered terms beyond taxonomy coverage (only with `--llm`)                 |
+| Salary hints       | Postings where a salary pattern was regex-extracted (with company + location)     |
+| Coverage gaps      | Taxonomy terms discovered by LLM but not yet in taxonomy (only with `--llm`)      |
 
 `--llm` mode calls `NINEROUTER_MODEL` through your local 9router endpoint (`NINEROUTER_BASE_URL`, default
-`http://localhost:20128/v1`) to extract skills that fall outside the fixed taxonomy. Results are cached in
-`data/skills.db` — repeat runs are instant with no API calls.
+`http://localhost:20128/v1`) with a **taxonomy-aware prompt** — the full taxonomy is sent to the LLM so it matches
+against known terms first and only flags genuinely new discoveries. Results are cached in `data/skills.db` — repeat
+runs are instant with no API calls.
 
 After each `--llm` run, newly discovered terms (seen in ≥ `LLM_CANDIDATE_THRESHOLD` jobs, default 2) are automatically
-queued in `taxonomy_candidates`.
+queued in `taxonomy_candidates`. Because the LLM is taxonomy-aware, uncovered terms are genuinely new
+technologies/tools — not synonyms or generic concepts.
 
 `--llm` prints two gap metrics: raw uncovered terms and actionable uncovered terms. Actionable terms satisfy
-`jobs_count >= threshold`, are not in `SKIP_TERMS`, and are not already present in `taxonomy_candidates`. Queue output (
-`[Candidates queue] ... pending review rows`) reports only `status='pending'` rows, so it will not match raw uncovered
-counts. Uncovered labels are printed as unescaped display text (e.g. `ci/cd pipelines`).
+`jobs_count >= threshold`, are not in `SKIP_TERMS`, and are not already present in `taxonomy_candidates`.
 
 **Rate-limit handling (429):** `analyze.py` parses retry wait from the provider error. If wait ≤
 `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` (default `30`), it sleeps and retries once. For longer waits (daily quota exhausted),
@@ -253,8 +253,8 @@ sqlite3 data/skills.db "UPDATE taxonomy_candidates SET status='rejected' WHERE c
 | `NINEROUTER_BASE_URL`             | "http://localhost:20128/v1"    | OpenAI-compatible 9router endpoint                 |
 | `NINEROUTER_MODEL`                | "groq/llama-3.3-70b-versatile" | Primary extraction model                           |
 | `NINEROUTER_FALLBACK_MODEL`       | "9router-combo"                | Fallback model/combo when primary is quota-limited |
-| `LLM_MAX_INPUT_CHARS`             | `6000`                         | Max characters sent from each posting to LLM       |
-| `LLM_MAX_OUTPUT_TOKENS`           | `800`                          | LLM completion token cap                           |
+| `LLM_MAX_INPUT_CHARS`             | `8000`                         | Max characters sent from each posting to LLM       |
+| `LLM_MAX_OUTPUT_TOKENS`           | `1000`                         | LLM completion token cap                           |
 | `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` | `30`                           | Max retry sleep for 429 before fallback            |
 | `RETRY_AFTER_BUFFER_SECONDS`      | `2`                            | Safety buffer added to parsed retry-after          |
 | `LLM_CANDIDATE_THRESHOLD`         | `2`                            | Min job occurrences to promote a candidate term    |
@@ -318,25 +318,25 @@ runs.
 17 categories, 227+ terms, stored in `data/skills.db` (SQLite). The DB is auto-created and seeded from `SKILLS_SEED` in
 `analyze.py` on first run. Additional terms accumulate automatically via the LLM promotion pipeline.
 
-| Category                   | Examples                                             |
-|----------------------------|------------------------------------------------------|
-| Languages                  | python, go, rust, java, kotlin, typescript           |
-| Python Frameworks          | fastapi, django, flask, aiohttp, starlette           |
-| Python Libraries           | sqlalchemy, pydantic, celery, asyncpg, boto3         |
-| Databases — Relational     | postgresql, mysql, cockroachdb, aurora               |
-| Databases — NoSQL/Search   | mongodb, redis, elasticsearch, cassandra, dynamodb   |
-| Databases — Analytical     | clickhouse, bigquery, snowflake, dbt                 |
-| Cloud                      | aws, gcp, azure, lambda, s3, step functions, bedrock |
-| Containers & Orchestration | kubernetes, docker, helm, argo, istio                |
-| IaC & CI/CD                | terraform, pulumi, github actions, gitlab ci, argocd |
-| Messaging & Streaming      | kafka, rabbitmq, sqs, kinesis, nats                  |
-| API & Architecture         | rest, graphql, grpc, microservices, cqrs, ddd        |
-| Auth & Security            | oauth2, jwt, keycloak, auth0, vault                  |
-| Monitoring & Observability | prometheus, grafana, datadog, opentelemetry          |
-| Testing                    | pytest, tdd, testcontainers, hypothesis, coverage.py |
-| AI / ML (in JD)            | llm, langchain, pgvector, rag, generative ai, cursor |
-| Soft / Process             | agile, mentoring, tech lead, staff engineer          |
-| Languages (non-technical)  | english, german, french, dutch                       |
+| Category                   | Examples                                                 |
+|----------------------------|----------------------------------------------------------|
+| Languages                  | python, go, rust, java, kotlin, typescript               |
+| Python Frameworks          | fastapi, django, flask, aiohttp, starlette               |
+| Python Libraries           | sqlalchemy, pydantic, celery, asyncpg, boto3             |
+| Databases — Relational     | postgresql, mysql, cockroachdb, aurora                   |
+| Databases — NoSQL/Search   | mongodb, redis, elasticsearch, cassandra, dynamodb       |
+| Databases — Analytical     | clickhouse, bigquery, snowflake, dbt                     |
+| Cloud                      | aws, gcp, azure, lambda, s3, step functions, bedrock     |
+| Containers & Orchestration | kubernetes, docker, helm, argo, istio                    |
+| IaC & CI/CD                | terraform, pulumi, github actions, gitlab ci, argocd     |
+| Messaging & Streaming      | kafka, rabbitmq, sqs, kinesis, nats                      |
+| API & Architecture         | rest, graphql, grpc, microservices, solid, cqrs, ddd     |
+| Auth & Security            | oauth2, jwt, keycloak, auth0, vault                      |
+| Monitoring & Observability | prometheus, grafana, datadog, opentelemetry              |
+| Testing                    | pytest, tdd, testcontainers, hypothesis, coverage.py     |
+| AI / ML (in JD)            | ai, llm, langchain, pgvector, rag, generative ai, cursor |
+| Soft / Process             | agile, mentoring, tech lead, staff engineer              |
+| Languages (non-technical)  | english, german, french, dutch                           |
 
 Add term without code change:
 
@@ -375,5 +375,8 @@ sqlite3 data/skills.db "SELECT term, taxonomy_category, jobs_count, status FROM 
 - **LinkedIn UI drift:** CSS selectors can break due to A/B tests. If fields become `null`, inspect `data/debug/`
   snapshots and update selector lists.
 - **LLM quota limits:** long quota windows skip sleep-retry and use fallback model if configured.
+- **Single-letter language matching:** `c` is matched as `\bc\b` which can false-positive on the English word. The
+  taxonomy pattern system uses `_unescape()` to derive display names, so complex regex patterns cannot be stored.
+  LLM extraction correctly disambiguates C language from prose.
 - **Best-effort extraction paths:** scraper field extractors fail soft by design and continue fallback traversal; debug
   logs now include selector/button context to make drift diagnosis faster.

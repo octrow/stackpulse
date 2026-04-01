@@ -83,10 +83,10 @@ NINEROUTER_MODEL = "groq/llama-3.3-70b-versatile"
 NINEROUTER_FALLBACK_MODEL = "9router-combo"
 
 # Maximum characters of job description text sent to the LLM
-LLM_MAX_INPUT_CHARS = 6_000
+LLM_MAX_INPUT_CHARS = 8_000
 
 # Maximum tokens the LLM may produce in a single extraction response
-LLM_MAX_OUTPUT_TOKENS = 800
+LLM_MAX_OUTPUT_TOKENS = 1_000
 
 # Maximum seconds to sleep-and-retry on a 429 rate-limit response.
 # Waits longer than this are not worth blocking on; fall back to the fallback model.

@@ -268,6 +268,7 @@ SKILLS_SEED: dict[str, list[str]] = {
         "gcov",
     ],
     "AI / ML (mentioned in JD)": [
+        "ai",
         "llm",
         "openai",
         "langchain",
@@ -405,6 +406,30 @@ _DB_HINTS: list[tuple[set[str], str]] = [
     ),
 ]
 
+# Keyword hints to pick the right sub-category when LLM says "concepts"
+_CONCEPT_HINTS: list[tuple[set[str], str]] = [
+    (
+        {
+            "ai",
+            "machine learning",
+            "ml",
+            "deep learning",
+            "neural",
+            "llm",
+            "generative ai",
+            "rag",
+            "nlp",
+            "computer vision",
+            "agentic",
+            "prompt engineering",
+            "fine-tuning",
+            "multi-agent",
+            "large language model",
+        },
+        "AI / ML (mentioned in JD)",
+    ),
+]
+
 # Initial alias seeds: (taxonomy_term, alias_text, language, alias_type)
 # Only seeded when term_aliases table is empty.
 # More aliases can be added via SQL (see module docstring).
@@ -434,12 +459,10 @@ _DEFAULT_LLM_CATEGORY = "API & Architecture"
 _REPORT_SKILL_WIDTH = 25
 _REPORT_CATEGORY_WIDTH = 30
 _REPORT_LOCATION_WIDTH = 35
-_REPORT_LLM_CATEGORY_WIDTH = 20
 _REPORT_TOP_SKILLS_COUNT = 30
 _REPORT_TOP_CATEGORIES_COUNT = 8
 _REPORT_TOP_LOCATIONS_COUNT = 15
 _REPORT_TOP_SALARY_COUNT = 20
-_REPORT_TOP_LLM_SKILLS_COUNT = 15
 _REPORT_TOP_MISSING_SKILLS_COUNT = 50
 
 
@@ -474,12 +497,16 @@ def normalize_term(term: str) -> str:
 
 def resolve_category(llm_category: str, term: str, category_map: dict[str, str]) -> str:
     """Map an LLM category + term to the best-matching taxonomy category."""
+    term_lower = term.lower()
     if llm_category == "databases":
-        term_lower = term.lower()
         for keywords, taxonomy_category in _DB_HINTS:
             if any(keyword in term_lower for keyword in keywords):
                 return taxonomy_category
         return _DEFAULT_DB_CATEGORY
+    if llm_category == "concepts":
+        for keywords, taxonomy_category in _CONCEPT_HINTS:
+            if any(keyword in term_lower for keyword in keywords):
+                return taxonomy_category
     return category_map.get(llm_category, _DEFAULT_LLM_CATEGORY)
 
 
@@ -658,11 +685,12 @@ def promote_llm_to_candidates(
         """
         SELECT skill, category, COUNT(DISTINCT url_key) AS n
         FROM llm_results
+        WHERE category != ?
         GROUP BY skill, category
         HAVING n >= ?
         ORDER BY n DESC
     """,
-        (threshold,),
+        (_MATCHED_CATEGORY, threshold),
     ).fetchall()
 
     newly_added_count = updated_count = 0
@@ -799,22 +827,45 @@ def print_candidates(conn: sqlite3.Connection) -> None:
 
 # ── LLM extraction ────────────────────────────────────────────────────────────
 
-LLM_PROMPT = """Extract ALL hard technical skills from this job description.
-Return ONLY a JSON object with these keys (use empty lists if none found):
-{
-  "languages": [],
-  "frameworks": [],
-  "libraries": [],
-  "databases": [],
-  "cloud_services": [],
-  "tools": [],
-  "concepts": [],
-  "devops": []
-}
+_MATCHED_CATEGORY = "_matched"
+"""Synthetic category key used in llm_results for taxonomy-matched terms."""
+
+
+def _build_llm_prompt(taxonomy: dict[str, list[tuple[str, str]]]) -> str:
+    """Build a taxonomy-aware LLM prompt.
+
+    Serializes existing taxonomy terms grouped by category so the LLM can match
+    against known terms and only flag genuinely new discoveries.
+    """
+    # Deduplicate display terms per category (aliases share the same display)
+    lines = []
+    categories_list = []
+    for category, term_pairs in taxonomy.items():
+        unique_terms = sorted({display for display, _ in term_pairs})
+        lines.append(f"  {category}: {', '.join(unique_terms)}")
+        categories_list.append(category)
+
+    taxonomy_block = "\n".join(lines)
+    categories_block = ", ".join(f'"{c}"' for c in categories_list)
+
+    return f"""You are a skill extraction assistant. Below is a taxonomy of known technical skills grouped by category.
+
+TAXONOMY:
+{taxonomy_block}
+
+TASK: Analyze the job description and:
+1. List ALL taxonomy terms that are mentioned or clearly implied. Use the EXACT term from the taxonomy — do not paraphrase.
+2. List any genuinely NEW technical skills/tools/protocols NOT in the taxonomy. For each, suggest the best-fit category from: {categories_block}.
+
+Return ONLY JSON:
+{{
+  "matched": ["term1", "term2"],
+  "new_terms": [{{"term": "newterm", "category": "Category Name"}}]
+}}
 
 Rules:
-- Use lowercase, canonical names (e.g. "postgresql" not "Postgres", "fastapi" not "FastAPI")
-- Be exhaustive — include everything technical mentioned
+- "matched" must contain ONLY exact terms from the taxonomy above, lowercase
+- "new_terms": only include specific, concrete technologies, tools, libraries, or protocols — NOT generic concepts like "debugging", "scalability", "containerization", "restful apis", "ci/cd pipelines", "async programming", "design patterns"
 - Do NOT include soft skills or company names
 - Return ONLY the JSON, no explanation
 
@@ -878,14 +929,14 @@ def _parse_retry_after(error_message: str) -> int | None:
     return None
 
 
-def _llm_call(client, model: str, text: str) -> dict[str, list[str]]:
+def _llm_call(client, model: str, prompt: str, text: str) -> dict:
     """Execute a single LLM extraction call and return parsed JSON.
 
     Raises on any error — callers handle retries and fallback.
     """
     response = client.chat.completions.create(
         model=model,
-        messages=[{"role": "user", "content": LLM_PROMPT + text[:LLM_MAX_INPUT_CHARS]}],
+        messages=[{"role": "user", "content": prompt + text[:LLM_MAX_INPUT_CHARS]}],
         max_tokens=LLM_MAX_OUTPUT_TOKENS,
         temperature=0,
     )
@@ -899,17 +950,18 @@ def _llm_call(client, model: str, text: str) -> dict[str, list[str]]:
 def _call_llm_with_retry(
     client,
     model: str,
+    prompt: str,
     text: str,
     url: str,
     attempt_label: str,
-) -> dict[str, list[str]] | None:
+) -> dict | None:
     """Execute one LLM call with at most one retry on short 429 windows."""
     import json as _json
 
     from openai import APIConnectionError, APIError, RateLimitError
 
     try:
-        return _llm_call(client, model, text)
+        return _llm_call(client, model, prompt, text)
     except RateLimitError as rate_limit_error:
         wait_seconds = _parse_retry_after(str(rate_limit_error))
         if wait_seconds is not None and wait_seconds <= LLM_RATE_LIMIT_MAX_WAIT_SECONDS:
@@ -918,7 +970,7 @@ def _call_llm_with_retry(
             )
             time.sleep(wait_seconds)
             try:
-                return _llm_call(client, model, text)
+                return _llm_call(client, model, prompt, text)
             except RateLimitError as retry_error:
                 print(f"  [LLM] 429 again after retry ({attempt_label}): {retry_error}")
                 return None
@@ -938,9 +990,17 @@ def _extract_skills_with_models(
     text: str,
     url: str,
     client,
-) -> dict[str, list[str]] | None:
+    prompt: str,
+) -> dict | None:
     """Run primary model, then optional fallback model on failure."""
-    result = _call_llm_with_retry(client, NINEROUTER_MODEL, text, url, NINEROUTER_MODEL)
+    result = _call_llm_with_retry(
+        client,
+        NINEROUTER_MODEL,
+        prompt,
+        text,
+        url,
+        NINEROUTER_MODEL,
+    )
     if result is not None:
         return result
 
@@ -951,14 +1011,61 @@ def _extract_skills_with_models(
     return _call_llm_with_retry(
         client,
         NINEROUTER_FALLBACK_MODEL,
+        prompt,
         text,
         url,
         f"fallback:{NINEROUTER_FALLBACK_MODEL}",
     )
 
 
+def _normalize_llm_result(
+    raw_result: dict, taxonomy: dict[str, list[tuple[str, str]]]
+) -> dict[str, list[str]]:
+    """Convert new-format LLM output to the cache-storable format.
+
+    New format from LLM: {"matched": ["python", ...], "new_terms": [{"term": "x", "category": "Y"}, ...]}
+    Cache format: {"_matched": ["python", ...], "Category Name": ["new_term", ...]}
+
+    Falls through for old-format results (already keyed by LLM category).
+    """
+    if "matched" not in raw_result and "new_terms" not in raw_result:
+        # Old-format LLM result — return as-is for backward compat
+        return raw_result
+
+    # Build set of valid taxonomy display terms for validation
+    valid_terms = {display for terms in taxonomy.values() for display, _ in terms}
+
+    normalized: dict[str, list[str]] = {}
+
+    # Matched terms — validate against taxonomy, store under _MATCHED_CATEGORY
+    matched = raw_result.get("matched", [])
+    if matched:
+        validated = [
+            t for t in matched if isinstance(t, str) and t.lower() in valid_terms
+        ]
+        if validated:
+            normalized[_MATCHED_CATEGORY] = validated
+
+    # New terms — store under their suggested taxonomy category
+    new_terms = raw_result.get("new_terms", [])
+    for entry in new_terms:
+        if not isinstance(entry, dict):
+            continue
+        term = entry.get("term", "")
+        category = entry.get("category", "")
+        if term and category:
+            normalized.setdefault(category, []).append(term.lower())
+
+    return normalized
+
+
 def extract_skills_llm(
-    text: str, url: str, conn: sqlite3.Connection, client
+    text: str,
+    url: str,
+    conn: sqlite3.Connection,
+    client,
+    prompt: str = "",
+    taxonomy: dict[str, list[tuple[str, str]]] | None = None,
 ) -> dict[str, list[str]]:
     """Call LLM via 9router to extract skills. Uses DB cache to avoid re-calls.
 
@@ -972,9 +1079,13 @@ def extract_skills_llm(
     if cached is not None:
         return cached
 
-    result = _extract_skills_with_models(text, url, client)
+    result = _extract_skills_with_models(text, url, client, prompt)
     if result is None:
         return {}
+
+    # Normalize new-format LLM output before caching
+    if taxonomy is not None:
+        result = _normalize_llm_result(result, taxonomy)
 
     _llm_cache_set(conn, url, cache_key, result)
     return result
@@ -1030,6 +1141,57 @@ def load_jobs(paths: list[Path]) -> list[dict]:
 # ── Analysis ──────────────────────────────────────────────────────────────────
 
 
+def _build_comprehensive_by_category(
+    skills_found: dict[str, list[str]],
+    llm_skills: dict[str, list[str]],
+    taxonomy: dict[str, list[tuple[str, str]]],
+    category_map: dict[str, str],
+) -> dict[str, list[str]]:
+    """Merge regex taxonomy hits with LLM skills into unified per-category dict.
+
+    New-format LLM results (with ``_matched`` key) use a reverse taxonomy lookup.
+    Old-format results fall back to ``resolve_category``.
+    """
+    merged: dict[str, list[str]] = {
+        cat: list(hits) for cat, hits in skills_found.items()
+    }
+
+    if _MATCHED_CATEGORY in llm_skills:
+        # New format — build reverse index: display_term -> category
+        term_to_cat: dict[str, str] = {}
+        for cat, term_pairs in taxonomy.items():
+            for display, _ in term_pairs:
+                term_to_cat.setdefault(display, cat)
+
+        # Merge matched taxonomy terms
+        for skill in llm_skills[_MATCHED_CATEGORY]:
+            target_cat = term_to_cat.get(skill.lower())
+            if target_cat is None:
+                continue
+            existing = merged.setdefault(target_cat, [])
+            if skill.lower() not in {s.lower() for s in existing}:
+                existing.append(skill)
+
+        # Merge new-discovery terms (stored under their taxonomy category)
+        for llm_cat, skills in llm_skills.items():
+            if llm_cat == _MATCHED_CATEGORY:
+                continue
+            for skill in skills:
+                existing = merged.setdefault(llm_cat, [])
+                if skill.lower() not in {s.lower() for s in existing}:
+                    existing.append(skill)
+    else:
+        # Old format — use resolve_category mapping
+        for llm_cat, skills in llm_skills.items():
+            for skill in skills:
+                target_cat = resolve_category(llm_cat, skill, category_map)
+                existing = merged.setdefault(target_cat, [])
+                if skill.lower() not in {s.lower() for s in existing}:
+                    existing.append(skill)
+
+    return merged
+
+
 def analyze(
     jobs: list[dict],
     taxonomy: dict[str, list[tuple[str, str]]],
@@ -1037,6 +1199,18 @@ def analyze(
     conn: sqlite3.Connection | None = None,
 ) -> pd.DataFrame:
     """Build a DataFrame with per-job metadata and extracted skills."""
+    # Load LLM → taxonomy category mapping if DB is available
+    category_map: dict[str, str] = {}
+    if conn is not None:
+        category_map = dict(
+            conn.execute(
+                "SELECT llm_category, taxonomy_category FROM llm_category_map"
+            ).fetchall()
+        )
+
+    # Build taxonomy-aware prompt once for the entire run
+    llm_prompt = _build_llm_prompt(taxonomy) if llm_client else ""
+
     job_rows = []
     for job in jobs:
         description = job.get("job_description") or ""
@@ -1048,15 +1222,27 @@ def analyze(
 
         llm_skills: dict[str, list[str]] = {}
         if llm_client and conn is not None:
-            llm_skills = extract_skills_llm(combined_text, url, conn, llm_client)
+            llm_skills = extract_skills_llm(
+                combined_text,
+                url,
+                conn,
+                llm_client,
+                prompt=llm_prompt,
+                taxonomy=taxonomy,
+            )
+
+        # Unified per-category dict (regex + LLM merged)
+        skills_by_cat = _build_comprehensive_by_category(
+            skills_found,
+            llm_skills,
+            taxonomy,
+            category_map,
+        )
 
         regex_skills_flat = [skill for hits in skills_found.values() for skill in hits]
-        llm_skills_flat = [skill for skills in llm_skills.values() for skill in skills]
-        seen_lower: set[str] = {s.lower() for s in regex_skills_flat}
-        comprehensive_extra = [
-            s for s in llm_skills_flat if s.lower() not in seen_lower
+        all_skills_comprehensive = [
+            skill for hits in skills_by_cat.values() for skill in hits
         ]
-        all_skills_comprehensive = regex_skills_flat + comprehensive_extra
 
         job_rows.append(
             {
@@ -1070,6 +1256,7 @@ def analyze(
                 "scraped_date": job.get("scraped_date"),
                 "applicant_count": job.get("applicant_count"),
                 "skills_raw": skills_found,
+                "skills_by_category": skills_by_cat,
                 "all_skills_flat": regex_skills_flat,
                 "all_skills_comprehensive": all_skills_comprehensive,
                 "skills_llm": llm_skills,
@@ -1094,9 +1281,10 @@ def _print_top_skills(df: pd.DataFrame) -> None:
     for skills_list in df[col]:
         all_skills.update(skills_list)
 
+    has_llm = "skills_llm" in df.columns and df["skills_llm"].apply(bool).any()
     label = (
         "comprehensive (regex + LLM)"
-        if col == "all_skills_comprehensive"
+        if col == "all_skills_comprehensive" and has_llm
         else "regex taxonomy"
     )
     print(f"\nTop {_REPORT_TOP_SKILLS_COUNT} skills [{label}] across all postings:")
@@ -1112,15 +1300,21 @@ def _print_category_breakdown(
     df: pd.DataFrame,
     taxonomy: dict[str, list[tuple[str, str]]],
 ) -> None:
-    """Print category-wise top terms based on regex taxonomy matches."""
-    skills_raw_list: list[dict] = df["skills_raw"].tolist()
+    """Print category-wise top terms (regex + LLM when available)."""
+    col = "skills_by_category" if "skills_by_category" in df.columns else "skills_raw"
+    skills_list: list[dict] = df[col].tolist()
 
     print("\nBy category:")
-    for category in taxonomy:
+    # Collect all categories present across jobs (taxonomy order first, then extras)
+    all_categories: list[str] = list(taxonomy.keys())
+    extra = {cat for row in skills_list for cat in row if cat not in taxonomy}
+    all_categories.extend(sorted(extra))
+
+    for category in all_categories:
         category_counter: Counter = Counter()
-        for skills_raw in skills_raw_list:
-            if category in skills_raw:
-                category_counter.update(skills_raw[category])
+        for skills_row in skills_list:
+            if category in skills_row:
+                category_counter.update(skills_row[category])
         if not category_counter:
             continue
 
@@ -1148,30 +1342,10 @@ def _print_salary_hints(df: pd.DataFrame) -> None:
     salary_rows = df[df["salary_extracted"].notna()]
     print(f"\nSalary hints found in {len(salary_rows)}/{len(df)} postings:")
     for _, row in salary_rows.head(_REPORT_TOP_SALARY_COUNT).iterrows():
-        print(f"  {row['job_title'] or 'N/A':<40} {row['salary_extracted']}")
-
-
-def _aggregate_llm_skills(skills_llm_list: list[dict]) -> dict[str, Counter]:
-    """Aggregate LLM skills by category across all jobs."""
-    llm_skill_aggregates: dict[str, Counter] = {}
-    for llm_skills in skills_llm_list:
-        if not llm_skills:
-            continue
-        for category, skills in llm_skills.items():
-            llm_skill_aggregates.setdefault(category, Counter()).update(skills)
-    return llm_skill_aggregates
-
-
-def _print_llm_skill_aggregates(llm_skill_aggregates: dict[str, Counter]) -> None:
-    """Print top LLM-discovered terms per LLM category."""
-    for category, counter in sorted(llm_skill_aggregates.items()):
-        if not counter:
-            continue
-        top_terms = ", ".join(
-            f"{term}({count})"
-            for term, count in counter.most_common(_REPORT_TOP_LLM_SKILLS_COUNT)
-        )
-        print(f"  {category:<{_REPORT_LLM_CATEGORY_WIDTH}} {top_terms}")
+        label = row["job_title"] or row.get("company") or "N/A"
+        location = row.get("search_location") or row.get("location") or ""
+        loc_hint = f" [{location}]" if location else ""
+        print(f"  {label:<40}{loc_hint:<25} {row['salary_extracted']}")
 
 
 def _taxonomy_term_set(taxonomy: dict[str, list[tuple[str, str]]]) -> set[str]:
@@ -1187,10 +1361,20 @@ def _count_missing_taxonomy_terms(
     skills_llm_list: list[dict],
     all_taxonomy_terms: set[str],
 ) -> Counter:
-    """Count LLM terms absent from current taxonomy/alias coverage."""
+    """Count LLM terms absent from current taxonomy/alias coverage.
+
+    For new-format results (with ``_matched`` key), only non-matched entries
+    are considered missing. For old-format results, all terms are diffed
+    against the taxonomy.
+    """
     skills_missing_from_taxonomy: Counter = Counter()
     for llm_skills in skills_llm_list:
-        for skills in (llm_skills or {}).values():
+        if not llm_skills:
+            continue
+        for cat, skills in llm_skills.items():
+            # Skip matched terms — they're already in taxonomy
+            if cat == _MATCHED_CATEGORY:
+                continue
             for skill in skills:
                 canonical = normalize_term(skill)
                 taxonomy_key = _taxonomy_plain_key(skill)
@@ -1261,17 +1445,15 @@ def _print_llm_section(
     existing_candidate_canonicals: set[str],
     candidate_threshold: int,
 ) -> None:
-    """Print LLM extraction aggregates and taxonomy coverage gaps."""
+    """Print taxonomy coverage gaps discovered by LLM extraction."""
     if "skills_llm" not in df.columns or not df["skills_llm"].apply(bool).any():
         return
 
     print(f"\n{'=' * 60}")
-    print("LLM-EXTRACTED SKILLS (open taxonomy)")
+    print("TAXONOMY COVERAGE GAPS (LLM-discovered)")
     print(f"{'=' * 60}")
 
     skills_llm_list: list[dict] = df["skills_llm"].tolist()
-    llm_skill_aggregates = _aggregate_llm_skills(skills_llm_list)
-    _print_llm_skill_aggregates(llm_skill_aggregates)
 
     all_taxonomy_terms = _taxonomy_term_set(taxonomy)
     skills_missing_from_taxonomy = _count_missing_taxonomy_terms(
@@ -1350,6 +1532,7 @@ def save_excel(
     """Export the analysis DataFrame to Excel with one column per skill category."""
     internal_columns = [
         "skills_raw",
+        "skills_by_category",
         "all_skills_flat",
         "all_skills_comprehensive",
         "skills_llm",
@@ -1357,17 +1540,19 @@ def save_excel(
     ]
     export_df = df.drop(columns=[col for col in internal_columns if col in df.columns])
 
-    for category in taxonomy:
-        export_df[category] = df["skills_raw"].apply(
+    source_col = (
+        "skills_by_category" if "skills_by_category" in df.columns else "skills_raw"
+    )
+    # Collect all categories across jobs (taxonomy order first, then extras from LLM)
+    all_categories: list[str] = list(taxonomy.keys())
+    if source_col == "skills_by_category":
+        extra = {cat for row in df[source_col] for cat in row if cat not in taxonomy}
+        all_categories.extend(sorted(extra))
+
+    for category in all_categories:
+        export_df[category] = df[source_col].apply(
             lambda raw, cat=category: ", ".join(raw.get(cat, []))
         )
-
-    if "skills_llm" in df.columns and df["skills_llm"].apply(bool).any():
-        llm_categories = sorted({cat for row in df["skills_llm"] if row for cat in row})
-        for category in llm_categories:
-            export_df[f"llm_{category}"] = df["skills_llm"].apply(
-                lambda llm, cat=category: ", ".join((llm or {}).get(cat, []))
-            )
 
     export_df.to_excel(output_path, index=False)
     print(f"\nExcel saved → {output_path.resolve()}")

@@ -222,16 +222,18 @@ async def _get_company(page: Page) -> tuple[str | None, str | None]:
     return None, None
 
 
+_LOCATION_EXCLUDE = {"skip to", "sign in", "main content", "linkedin", "cookie"}
+
+
 async def _get_location(page: Page) -> str | None:
     """Extract the job location string."""
 
     def _is_location(text: str) -> bool:
+        text_lower = text.lower()
+        if any(pat in text_lower for pat in _LOCATION_EXCLUDE):
+            return False
         return 3 < len(text) < 80 and (
-            "," in text
-            or "Remote" in text
-            or "Hybrid" in text
-            or "On-site" in text
-            or any(c.isupper() for c in text)
+            "," in text or "Remote" in text or "Hybrid" in text or "On-site" in text
         )
 
     return await _find_text_matching(page, _LOCATION_SELECTORS, _is_location)
