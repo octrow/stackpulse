@@ -69,6 +69,13 @@ Legacy script commands remain valid and are used by the CLI internally.
 `analyze` DB connection is owned by the command function and closed in a `try/finally` — the pipeline helper never
 closes it.
 
+Analyze DB responsibilities are split by module:
+
+- `analysis_db.py` — connection helpers, schema init/migrations, and `load_skills()`
+- `analysis_candidates.py` — candidates queue read/write/promotion operations
+- `analysis_llm_cache.py` — LLM cache key + DB cache read/write
+- `analyze.py` — orchestration/reporting facade that reuses these helpers
+
 Prefer reusing script-level functions and keep behavior parity with existing entrypoints.
 
 ## Architecture
