@@ -45,6 +45,7 @@ py analyze.py --all --promote        # promote first, then analyze with enriched
 ```
 
 `stackpulse auto` defaults:
+
 - creates `.venv` if missing
 - installs dependencies only when missing
 - installs Playwright Chromium only when missing
@@ -56,11 +57,17 @@ Legacy script commands remain valid and are used by the CLI internally.
 ## CLI architecture
 
 `cli.py` is a thin Typer + Rich wrapper over existing module logic:
+
 - no-args invocation → `_interactive_wizard()` (prompts for command + options, then calls the function directly)
 - `setup-session` → `setup_session.main()`
 - `scrape` → `scrape.scrape_all()`
-- `analyze` → same workflow as `analyze.py main()` using existing helper functions; cohort filters (`--title-contains`, `--location-contains`) applied after `load_jobs()` before `analyze()`
+- `analyze` → early-exit branches (candidates, promote-only, no-paths) in the command function; core pipeline delegated
+  to `_run_analysis_pipeline()`; cohort filters (`--title-contains`, `--location-contains`) applied inside that helper
+  after `load_jobs()`
 - `auto` → orchestrates venv/bootstrap/session/scrape/analyze sequence
+
+`analyze` DB connection is owned by the command function and closed in a `try/finally` — the pipeline helper never
+closes it.
 
 Prefer reusing script-level functions and keep behavior parity with existing entrypoints.
 
@@ -70,11 +77,16 @@ The library (`linkedin_scraper`) provides two working pieces and one broken piec
 
 - **`BrowserManager`** — Playwright browser wrapper with session save/load. Used as an async context manager.
 - **`JobSearchScraper`** — searches LinkedIn and returns a list of job URLs. Works correctly.
-- **`JobScraper`** (library) — **broken**: only waits for `domcontentloaded`, so it reads an empty DOM before React renders. All fields return `null`. Do not use it.
+- **`JobScraper`** (library) — **broken**: only waits for `domcontentloaded`, so it reads an empty DOM before React
+  renders. All fields return `null`. Do not use it.
 
-`job_scraper_direct.py` is the drop-in replacement for `JobScraper`. It navigates to the job URL, waits for `<h1>` to appear, clicks description expand buttons, and extracts fields via ordered selector fallback lists. When `<h1>` never appears, it dumps a screenshot and HTML snippet to `OUTPUT_DIR/debug/<job_id>.*`.
+`job_scraper_direct.py` is the drop-in replacement for `JobScraper`. It navigates to the job URL, waits for `<h1>` to
+appear, clicks description expand buttons, and extracts fields via ordered selector fallback lists. When `<h1>` never
+appears, it dumps a screenshot and HTML snippet to `OUTPUT_DIR/debug/<job_id>.*`.
 
-`scrape.py` is now intentionally split into small orchestration helpers (`_search_query_urls`, `_scrape_query_urls`, `_log_run_summary`, etc.) to keep `scrape_all()` readable while preserving auto-resume and save-after-each-job semantics.
+`scrape.py` is now intentionally split into small orchestration helpers (`_search_query_urls`, `_scrape_query_urls`,
+`_log_run_summary`, etc.) to keep `scrape_all()` readable while preserving auto-resume and save-after-each-job
+semantics.
 
 ## Data flow
 
@@ -94,66 +106,107 @@ config.py (queries + timeouts + paths + LLM settings)
 ```
 
 **`data/skills.db` tables:**
+
 - `taxonomy(category, term)` — the skill list; seeded from `SKILLS_SEED` in `analyze.py` on first run; editable via SQL
 - `llm_results(url_key, url, category, skill)` — LLM extraction results, one row per skill per job; keyed by MD5 of URL
-- `llm_category_map(llm_category, taxonomy_category)` — maps LLM's 8 output categories to taxonomy categories; seeded once, editable via SQL
-- `taxonomy_candidates(term, canonical, taxonomy_category, llm_category, jobs_count, status, added_date)` — promotion queue; `status` is `pending` / `approved` / `rejected`
-- `term_aliases(taxonomy_id, alias, canonical, lang, alias_type)` — synonyms and multilingual variants for existing taxonomy terms; seeded with `python3`/`python 3`
+- `llm_category_map(llm_category, taxonomy_category)` — maps LLM's 8 output categories to taxonomy categories; seeded
+  once, editable via SQL
+- `taxonomy_candidates(term, canonical, taxonomy_category, llm_category, jobs_count, status, added_date)` — promotion
+  queue; `status` is `pending` / `approved` / `rejected`
+- `term_aliases(taxonomy_id, alias, canonical, lang, alias_type)` — synonyms and multilingual variants for existing
+  taxonomy terms; seeded with `python3`/`python 3`
 
 ## Key design decisions
 
-**Auto-resume**: `scrape.py` always loads all URLs from every `data/jobs_*.json` on startup and skips them. There is no separate resume flag — use `--fresh` to override.
+**Auto-resume**: `scrape.py` always loads all URLs from every `data/jobs_*.json` on startup and skips them. There is no
+separate resume flag — use `--fresh` to override.
 
 **Incremental save**: `save_jobs()` overwrites the output file after every single job. Safe to `Ctrl+C` at any time.
 
-**Selector fallback pattern**: every extractor in `job_scraper_direct.py` tries a list of CSS selectors from most-specific to least-specific. LinkedIn A/B tests its UI, so specific class names drift. Generic fallbacks keep extraction working when class names change. Extraction errors are now logged with selector/button context while still failing soft to the next fallback.
+**Selector fallback pattern**: every extractor in `job_scraper_direct.py` tries a list of CSS selectors from
+most-specific to least-specific. LinkedIn A/B tests its UI, so specific class names drift. Generic fallbacks keep
+extraction working when class names change. Extraction errors are now logged with selector/button context while still
+failing soft to the next fallback.
 
-**Salary**: not a structured LinkedIn field. `extract_salary()` in `scrape.py` regex-scans `job_description` text for currency patterns and stores the result in `salary_extracted`.
+**Salary**: not a structured LinkedIn field. `extract_salary()` in `scrape.py` regex-scans `job_description` text for
+currency patterns and stores the result in `salary_extracted`.
 
-**Taxonomy term storage**: `taxonomy.term` stores the regex pattern, not the display string. Most terms are plain lowercase (e.g. `github actions`). Special characters must be pre-escaped (e.g. `c\+\+` for C++). `load_taxonomy()` unescapes patterns back to display strings via `re.sub(r"\\(.)", r"\1", term)`.
+**Taxonomy term storage**: `taxonomy.term` stores the regex pattern, not the display string. Most terms are plain
+lowercase (e.g. `github actions`). Special characters must be pre-escaped (e.g. `c\+\+` for C++). `load_taxonomy()`
+unescapes patterns back to display strings via `re.sub(r"\\(.)", r"\1", term)`.
 
-**LLM → taxonomy pipeline**: `--llm` extracts skills via LLM and caches results in `llm_results`. After each run, `promote_llm_to_candidates()` automatically queues terms seen in ≥ 2 jobs that are absent from taxonomy/alias coverage. `--promote` moves pending candidates into `taxonomy`, making them available in all future regex-based runs.
+**LLM → taxonomy pipeline**: `--llm` extracts skills via LLM and caches results in `llm_results`. After each run,
+`promote_llm_to_candidates()` automatically queues terms seen in ≥ `LLM_CANDIDATE_THRESHOLD` jobs (default 2, set in
+`config.py`) that are absent from taxonomy/alias coverage. `--promote` moves pending candidates into `taxonomy`, making
+them available in all future regex-based runs.
 
-**Coverage gap vs queue status**: `--llm` reports two metrics: raw uncovered terms and actionable uncovered terms. Actionable terms require `jobs_count >= threshold`, exclusion from `SKIP_TERMS`, and absence from existing `taxonomy_candidates`. `--candidates` shows queue state only (`pending`/`approved`/`rejected`), so it will diverge from raw uncovered counts. Uncovered terms are printed as unescaped display text.
+**Coverage gap vs queue status**: `--llm` reports two metrics: raw uncovered terms and actionable uncovered terms.
+Actionable terms require `jobs_count >= threshold`, exclusion from `SKIP_TERMS`, and absence from existing
+`taxonomy_candidates`. `--candidates` shows queue state only (`pending`/`approved`/`rejected`), so it will diverge from
+raw uncovered counts. Uncovered terms are printed as unescaped display text.
 
-**LLM 429 / rate-limit handling**: `extract_skills_llm()` uses `_call_llm_with_retry()` and `_extract_skills_with_models()` to keep retry/fallback logic isolated. It parses suggested wait from the error message (supports `"try again in ..."` and `"reset after ..."`). If wait ≤ `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` (default 30s), it sleeps and retries once. For longer waits (daily quota exhaustion), it falls back to `NINEROUTER_FALLBACK_MODEL`.
+**LLM 429 / rate-limit handling**: `extract_skills_llm()` uses `_call_llm_with_retry()` and
+`_extract_skills_with_models()` to keep retry/fallback logic isolated. It parses suggested wait from the error message (
+supports `"try again in ..."` and `"reset after ..."`). If wait ≤ `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` (default 30s), it
+sleeps and retries once. For longer waits (daily quota exhaustion), it falls back to `NINEROUTER_FALLBACK_MODEL`.
+Non-rate-limit errors (`APIError`, `APIConnectionError`, `JSONDecodeError`, `ValueError`) are caught specifically —
+broad `except Exception` is not used.
 
-**`SKIP_TERMS`**: generic noise terms (`api`, `testing`, `automation`, etc.) that are blacklisted from entering `taxonomy_candidates`.
+**`SKIP_TERMS`**: generic noise terms (`api`, `testing`, `automation`, etc.) that are blacklisted from entering
+`taxonomy_candidates`.
 
-**Comprehensive skills metric**: when `--llm` is used, `analyze()` builds `all_skills_comprehensive` per job — regex taxonomy hits plus LLM-discovered terms not already in the regex set (deduped by lowercase canonical). `_print_top_skills` uses this column automatically; `all_skills_flat` (regex-only) is preserved for backward-compatible Excel export columns.
+**Public analyze API**: `resolve_input_paths(args, data_dir)` and `build_llm_client(base_url, model)` are public
+functions (no leading underscore). `cli.py` calls them directly via `import analyze as analyzer`. `_VALID_DB_TABLES` is
+an allowlist used by `_table_is_empty()` to guard against raw SQL table-name injection.
 
-**Report additions**: `print_report` now calls `_print_quality_summary` (empty-description + zero-skill-job counts) and `_print_skills_by_location` (top 3 skills per unique `search_location`, skipped when ≤1 location). Category breakdown includes prevalence % per top term.
+**Comprehensive skills metric**: when `--llm` is used, `analyze()` builds `all_skills_comprehensive` per job — regex
+taxonomy hits plus LLM-discovered terms not already in the regex set (deduped by lowercase canonical).
+`_print_top_skills` uses this column automatically; `all_skills_flat` (regex-only) is preserved for backward-compatible
+Excel export columns.
 
-**Field coverage logging**: `_log_run_summary` logs counts of jobs missing `job_description`, `job_title`, and `location` at end of each scrape run (visible in `data/scraper.log`).
+**Report additions**: `print_report` now calls `_print_quality_summary` (empty-description + zero-skill-job counts) and
+`_print_skills_by_location` (top 3 skills per unique `search_location`, skipped when ≤1 location). Category breakdown
+includes prevalence % per top term.
+
+**Field coverage logging**: `_log_run_summary` logs counts of jobs missing `job_description`, `job_title`, and
+`location` at end of each scrape run (visible in `data/scraper.log`).
 
 ## Selector debugging
 
 If job fields return `null` again, check `data/debug/`. The page title in the debug output tells you what happened:
+
 - `"LinkedIn"` or `"Sign In | LinkedIn"` → session expired, re-run `setup_session.py`
-- `"Senior ... | LinkedIn"` → page loaded but selectors need updating — inspect saved HTML and update selector lists in `job_scraper_direct.py`
+- `"Senior ... | LinkedIn"` → page loaded but selectors need updating — inspect saved HTML and update selector lists in
+  `job_scraper_direct.py`
 
 ## Extending search queries
 
-Edit `SEARCH_QUERIES` in `config.py` — list of `(keywords, location)` tuples. LinkedIn location strings must match what LinkedIn search autocomplete accepts (e.g. `"Berlin, Germany"` not `"Berlin"`).
+Edit `SEARCH_QUERIES` in `config.py` — list of `(keywords, location)` tuples. LinkedIn location strings must match what
+LinkedIn search autocomplete accepts (e.g. `"Berlin, Germany"` not `"Berlin"`).
 
 ## Extending skill detection
 
 Taxonomy is stored in `data/skills.db`, not hardcoded. Ways to add terms:
 
 **Via the promotion pipeline (recommended):**
+
 ```bash
 py analyze.py --llm    # extracts and queues candidates automatically
 py analyze.py --promote
 ```
 
 **Via SQL (immediate, no code change):**
+
 ```bash
 sqlite3 data/skills.db "INSERT OR IGNORE INTO taxonomy(category,term) VALUES('Cloud','hetzner')"
 ```
 
-**Via code (to persist across DB resets):** edit `SKILLS_SEED` in `analyze.py`. Terms are matched as whole words (`\b` boundary) against lowercased `job_title + job_description`. Escape special regex characters (e.g. `"c\\+\\+"` for C++, `"node\\.js"` for Node.js).
+**Via code (to persist across DB resets):** edit `SKILLS_SEED` in `analyze.py`. Terms are matched as whole words (`\b`
+boundary) against lowercased `job_title + job_description`. Escape special regex characters (e.g. `"c\\+\\+"` for C++,
+`"node\\.js"` for Node.js).
 
 **Add a multilingual alias:**
+
 ```bash
 sqlite3 data/skills.db \
   "INSERT INTO term_aliases(taxonomy_id,alias,canonical,lang,alias_type)
@@ -161,6 +214,7 @@ sqlite3 data/skills.db \
 ```
 
 **Adjust LLM category → taxonomy category mapping:**
+
 ```bash
 sqlite3 data/skills.db "UPDATE llm_category_map SET taxonomy_category='Testing' WHERE llm_category='concepts'"
 ```

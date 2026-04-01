@@ -183,7 +183,8 @@ Prints a skill frequency table to stdout and saves `data/jobs_*_analysis.xlsx` w
 `http://localhost:20128/v1`) to extract skills that fall outside the fixed taxonomy. Results are cached in
 `data/skills.db` — repeat runs are instant with no API calls.
 
-After each `--llm` run, newly discovered terms (seen in ≥ 2 jobs) are automatically queued in `taxonomy_candidates`.
+After each `--llm` run, newly discovered terms (seen in ≥ `LLM_CANDIDATE_THRESHOLD` jobs, default 2) are automatically
+queued in `taxonomy_candidates`.
 
 `--llm` prints two gap metrics: raw uncovered terms and actionable uncovered terms. Actionable terms satisfy
 `jobs_count >= threshold`, are not in `SKIP_TERMS`, and are not already present in `taxonomy_candidates`. Queue output (
@@ -256,6 +257,7 @@ sqlite3 data/skills.db "UPDATE taxonomy_candidates SET status='rejected' WHERE c
 | `LLM_MAX_OUTPUT_TOKENS`           | `800`                          | LLM completion token cap                           |
 | `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` | `30`                           | Max retry sleep for 429 before fallback            |
 | `RETRY_AFTER_BUFFER_SECONDS`      | `2`                            | Safety buffer added to parsed retry-after          |
+| `LLM_CANDIDATE_THRESHOLD`         | `2`                            | Min job occurrences to promote a candidate term    |
 
 Current search targets: Berlin, Hamburg, Munich, Germany (general), Vienna, Amsterdam, Luxembourg, Barcelona, Madrid,
 London, Remote — all for senior Python/FastAPI backend roles.

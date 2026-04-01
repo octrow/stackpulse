@@ -70,6 +70,9 @@ _DESCRIPTION_SELECTORS: list[str] = [
 
 _LINKEDIN_BASE_URL = "https://www.linkedin.com"
 
+_DATE_KEYWORDS = ("ago", "hour", "day", "week", "month", "reposted")
+_APPLICANT_KEYWORDS = ("applicant", "people clicked", "applied")
+
 
 async def scrape_job(page: Page, url: str) -> dict:
     """Navigate to a LinkedIn job posting and extract all fields.
@@ -236,7 +239,6 @@ async def _get_location(page: Page) -> str | None:
 
 async def _get_posted_date(page: Page) -> str | None:
     """Extract the relative posting date (e.g. '2 days ago')."""
-    _DATE_KEYWORDS = ("ago", "hour", "day", "week", "month", "reposted")
 
     def _is_posted_date(text: str) -> bool:
         return len(text) < 60 and any(
@@ -248,7 +250,6 @@ async def _get_posted_date(page: Page) -> str | None:
 
 async def _get_applicants(page: Page) -> str | None:
     """Extract the applicant count string."""
-    _APPLICANT_KEYWORDS = ("applicant", "people clicked", "applied")
 
     def _is_applicant_count(text: str) -> bool:
         return len(text) < 80 and any(
@@ -263,6 +264,14 @@ async def _get_description(page: Page) -> str | None:
 
     Tries specific containers first, then falls back to an 'About the job' heading search.
     """
+    text = await _get_description_from_selectors(page)
+    if text:
+        return text
+    return await _get_description_from_about_heading(page)
+
+
+async def _get_description_from_selectors(page: Page) -> str | None:
+    """Try each description selector in order, returning the first hit long enough to be valid."""
     for selector in _DESCRIPTION_SELECTORS:
         try:
             element = page.locator(selector).first
@@ -277,9 +286,11 @@ async def _get_description(page: Page) -> str | None:
                 type(error).__name__,
                 error,
             )
-            continue
+    return None
 
-    # Last resort: find "About the job" section and grab surrounding text
+
+async def _get_description_from_about_heading(page: Page) -> str | None:
+    """Last resort: locate the 'About the job' h2 and extract its ancestor container."""
     try:
         heading = page.locator("h2").filter(has_text="About the job").first
         if await heading.count() > 0:
@@ -294,5 +305,4 @@ async def _get_description(page: Page) -> str | None:
             type(error).__name__,
             error,
         )
-
     return None

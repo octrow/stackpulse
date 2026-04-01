@@ -46,6 +46,7 @@ from config import (
     LLM_MAX_INPUT_CHARS,
     LLM_MAX_OUTPUT_TOKENS,
     RETRY_AFTER_BUFFER_SECONDS,
+    LLM_CANDIDATE_THRESHOLD,
 )
 
 # ── Seed taxonomy (used only to initialise the DB on first run) ───────────────
@@ -412,6 +413,22 @@ ALIAS_SEED: list[tuple[str, str, str, str]] = [
     ("python", "python 3", "en", "variant"),
 ]
 
+# ── DB safety constants ───────────────────────────────────────────────────────
+
+_VALID_DB_TABLES: frozenset[str] = frozenset(
+    {
+        "taxonomy",
+        "llm_results",
+        "llm_category_map",
+        "taxonomy_candidates",
+        "term_aliases",
+    }
+)
+
+# Fallback taxonomy category names used in resolve_category
+_DEFAULT_DB_CATEGORY = "Databases — Relational"
+_DEFAULT_LLM_CATEGORY = "API & Architecture"
+
 # ── Display formatting constants ──────────────────────────────────────────────
 
 _REPORT_SKILL_WIDTH = 25
@@ -439,6 +456,8 @@ def open_db(data_dir: Path) -> sqlite3.Connection:
 
 def _table_is_empty(conn: sqlite3.Connection, table_name: str) -> bool:
     """Return True if the given table has no rows."""
+    if table_name not in _VALID_DB_TABLES:
+        raise ValueError(f"Unknown table: {table_name!r}")
     return conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0] == 0
 
 
@@ -460,8 +479,8 @@ def resolve_category(llm_category: str, term: str, category_map: dict[str, str])
         for keywords, taxonomy_category in _DB_HINTS:
             if any(keyword in term_lower for keyword in keywords):
                 return taxonomy_category
-        return "Databases — Relational"  # fallback for unknown DB terms
-    return category_map.get(llm_category, "API & Architecture")
+        return _DEFAULT_DB_CATEGORY
+    return category_map.get(llm_category, _DEFAULT_LLM_CATEGORY)
 
 
 def init_db(conn: sqlite3.Connection) -> None:
@@ -596,7 +615,9 @@ def _taxonomy_plain_key(term: str) -> str:
     return re.sub(r"\\(.)", r"\1", term).lower().strip()
 
 
-def promote_llm_to_candidates(conn: sqlite3.Connection, threshold: int = 2) -> int:
+def promote_llm_to_candidates(
+    conn: sqlite3.Connection, threshold: int = LLM_CANDIDATE_THRESHOLD
+) -> int:
     """Aggregate llm_results and queue new terms in taxonomy_candidates.
 
     Only terms seen in >= threshold distinct jobs are added.
@@ -883,7 +904,9 @@ def _call_llm_with_retry(
     attempt_label: str,
 ) -> dict[str, list[str]] | None:
     """Execute one LLM call with at most one retry on short 429 windows."""
-    from openai import RateLimitError
+    import json as _json
+
+    from openai import APIConnectionError, APIError, RateLimitError
 
     try:
         return _llm_call(client, model, text)
@@ -893,10 +916,7 @@ def _call_llm_with_retry(
             print(
                 f"  [LLM] 429 on {attempt_label} — sleeping {wait_seconds}s then retrying …"
             )
-            try:
-                time.sleep(wait_seconds)
-            except KeyboardInterrupt:
-                raise
+            time.sleep(wait_seconds)
             try:
                 return _llm_call(client, model, text)
             except RateLimitError as retry_error:
@@ -909,7 +929,7 @@ def _call_llm_with_retry(
             f"skipping primary"
         )
         return None
-    except Exception as error:
+    except (APIError, APIConnectionError, _json.JSONDecodeError, ValueError) as error:
         print(f"  [LLM] Warning: extraction failed for {url[:60]}: {error}")
         return None
 
@@ -1356,7 +1376,7 @@ def save_excel(
 # ── Entry point helpers ───────────────────────────────────────────────────────
 
 
-def _resolve_input_paths(args: Namespace, data_dir: Path) -> list[Path] | None:
+def resolve_input_paths(args: Namespace, data_dir: Path) -> list[Path] | None:
     """Determine which JSON file(s) to analyze based on CLI arguments.
 
     Returns a list of Paths, or None if no files are found and execution should stop.
@@ -1386,7 +1406,7 @@ def _resolve_input_paths(args: Namespace, data_dir: Path) -> list[Path] | None:
     return [latest_file]
 
 
-def _build_llm_client(base_url: str, model: str):
+def build_llm_client(base_url: str, model: str):
     """Initialise and return an OpenAI-compatible client for 9router, or None on failure."""
     try:
         from openai import OpenAI
@@ -1432,73 +1452,67 @@ def main() -> None:
 
     data_dir = Path(OUTPUT_DIR)
     conn = open_db(data_dir)
-    init_db(conn)
+    try:
+        init_db(conn)
 
-    # Standalone: inspect candidates queue only
-    if args.candidates:
-        print_candidates(conn)
-        conn.close()
-        return
+        # Standalone: inspect candidates queue only
+        if args.candidates:
+            print_candidates(conn)
+            return
 
-    # promote-only mode: no job files needed
-    promote_only = args.promote is not None and not args.file and not args.all
-    if promote_only:
-        apply_candidates(conn, max(args.promote, 1))
-        conn.close()
-        return
+        # promote-only mode: no job files needed
+        promote_only = args.promote is not None and not args.file and not args.all
+        if promote_only:
+            apply_candidates(conn, max(args.promote, 1))
+            return
 
-    # Resolve which job file(s) to load
-    paths = _resolve_input_paths(args, data_dir)
-    if paths is None:
-        # No files found; still run promote if requested
+        # Resolve which job file(s) to load
+        paths = resolve_input_paths(args, data_dir)
+        if paths is None:
+            # No files found; still run promote if requested
+            if args.promote is not None:
+                apply_candidates(conn, max(args.promote, 1))
+            return
+
+        # Promote before loading taxonomy so analysis uses the enriched term set
         if args.promote is not None:
             apply_candidates(conn, max(args.promote, 1))
+
+        taxonomy = load_taxonomy(conn)
+        term_count = sum(len(terms) for terms in taxonomy.values())
+        print(
+            f"Taxonomy loaded: {term_count} terms (+ aliases) across {len(taxonomy)} categories"
+        )
+
+        print(f"Loading from: {[str(p) for p in paths]}")
+        jobs = load_jobs(paths)
+        print(f"Loaded {len(jobs)} unique jobs.")
+
+        if not jobs:
+            return
+
+        llm_client = None
+        if args.llm:
+            llm_client = build_llm_client(NINEROUTER_BASE_URL, NINEROUTER_MODEL)
+
+        df = analyze(jobs, taxonomy, llm_client=llm_client, conn=conn)
+
+        # After LLM extraction, auto-queue newly discovered terms as candidates
+        if args.llm and llm_client:
+            promote_llm_to_candidates(conn, threshold=LLM_CANDIDATE_THRESHOLD)
+
+        existing_candidate_canonicals = {
+            row["canonical"]
+            for row in conn.execute("SELECT canonical FROM taxonomy_candidates")
+        }
+    finally:
         conn.close()
-        return
-
-    # Promote before loading taxonomy so analysis uses the enriched term set
-    if args.promote is not None:
-        apply_candidates(conn, max(args.promote, 1))
-
-    taxonomy = load_taxonomy(conn)
-    term_count = sum(len(terms) for terms in taxonomy.values())
-    print(
-        f"Taxonomy loaded: {term_count} terms (+ aliases) across {len(taxonomy)} categories"
-    )
-
-    print(f"Loading from: {[str(p) for p in paths]}")
-    jobs = load_jobs(paths)
-    print(f"Loaded {len(jobs)} unique jobs.")
-
-    if not jobs:
-        conn.close()
-        return
-
-    llm_client = None
-    if args.llm:
-        llm_client = _build_llm_client(NINEROUTER_BASE_URL, NINEROUTER_MODEL)
-
-    candidate_threshold = 2
-    existing_candidate_canonicals: set[str] = set()
-
-    df = analyze(jobs, taxonomy, llm_client=llm_client, conn=conn)
-
-    # After LLM extraction, auto-queue newly discovered terms as candidates
-    if args.llm and llm_client:
-        promote_llm_to_candidates(conn, threshold=candidate_threshold)
-
-    existing_candidate_canonicals = {
-        row["canonical"]
-        for row in conn.execute("SELECT canonical FROM taxonomy_candidates")
-    }
-
-    conn.close()
 
     print_report(
         df,
         taxonomy,
         existing_candidate_canonicals=existing_candidate_canonicals,
-        candidate_threshold=candidate_threshold,
+        candidate_threshold=LLM_CANDIDATE_THRESHOLD,
     )
 
     output_stem = paths[0].stem if len(paths) == 1 else "jobs_all"

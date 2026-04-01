@@ -12,6 +12,8 @@ from rich.console import Console
 from rich.table import Table
 from rich.traceback import install as install_rich_traceback
 
+from config import LLM_CANDIDATE_THRESHOLD
+
 install_rich_traceback(show_locals=False)
 
 app = typer.Typer(help="StackPulse CLI", invoke_without_command=True)
@@ -159,6 +161,48 @@ def setup_session_command() -> None:
         raise typer.Exit(code=1) from exc
 
 
+def _run_async(coro):
+    """Run an async coroutine, suppressing Playwright teardown noise on Ctrl+C."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    def _exc_handler(_loop, ctx):
+        exc = ctx.get("exception")
+        if exc is not None and "TargetClosedError" in type(exc).__name__:
+            return
+        _loop.default_exception_handler(ctx)
+
+    loop.set_exception_handler(_exc_handler)
+
+    orig_unraisablehook = sys.unraisablehook
+
+    def _quiet_unraisable(item):
+        if item.exc_type is RuntimeError and "Event loop is closed" in str(
+            item.exc_value
+        ):
+            return
+        orig_unraisablehook(item)
+
+    sys.unraisablehook = _quiet_unraisable
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        try:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.run_until_complete(loop.shutdown_default_executor())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+            sys.unraisablehook = orig_unraisablehook
+
+
 @app.command()
 def scrape(
     limit: Optional[int] = typer.Option(
@@ -173,14 +217,84 @@ def scrape(
 
         effective_limit = limit if limit is not None else JOBS_PER_QUERY
         with console.status("[bold cyan]Running scrape workflow...", spinner="dots"):
-            asyncio.run(scrape_all(limit_per_query=effective_limit, fresh=fresh))
+            _run_async(scrape_all(limit_per_query=effective_limit, fresh=fresh))
         console.print("[green]Scrape completed.[/green]")
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         console.print("[yellow]Scrape interrupted by user.[/yellow]")
-        raise typer.Exit(code=130)
+        raise typer.Exit(code=130) from exc
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]scrape failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc
+
+
+def _run_analysis_pipeline(
+    analyzer,
+    conn,
+    paths: list[Path],
+    data_dir: Path,
+    promote: Optional[int],
+    use_llm: bool,
+    title_contains: Optional[str],
+    location_contains: Optional[str],
+) -> None:
+    """Execute the core analysis pipeline: load → filter → analyze → report → export.
+
+    Assumes DB is open; does NOT close it (caller's responsibility via try/finally).
+    """
+    if promote is not None:
+        analyzer.apply_candidates(conn, promote)
+
+    taxonomy = analyzer.load_taxonomy(conn)
+    term_count = sum(len(terms) for terms in taxonomy.values())
+    console.print(
+        f"Taxonomy loaded: {term_count} terms (+ aliases) across {len(taxonomy)} categories"
+    )
+
+    console.print(f"Loading from: {[str(p) for p in paths]}")
+    jobs = analyzer.load_jobs(paths)
+    console.print(f"Loaded {len(jobs)} unique jobs.")
+
+    if title_contains:
+        jobs = [
+            j
+            for j in jobs
+            if title_contains.lower() in (j.get("job_title") or "").lower()
+        ]
+        console.print(f"After title filter '{title_contains}': {len(jobs)} jobs")
+    if location_contains:
+        jobs = [
+            j
+            for j in jobs
+            if location_contains.lower() in (j.get("location") or "").lower()
+        ]
+        console.print(f"After location filter '{location_contains}': {len(jobs)} jobs")
+
+    if not jobs:
+        return
+
+    llm_client = None
+    if use_llm:
+        llm_client = analyzer.build_llm_client(
+            analyzer.NINEROUTER_BASE_URL,
+            analyzer.NINEROUTER_MODEL,
+        )
+
+    df = analyzer.analyze(jobs, taxonomy, llm_client=llm_client, conn=conn)
+
+    if use_llm and llm_client:
+        analyzer.promote_llm_to_candidates(conn, threshold=LLM_CANDIDATE_THRESHOLD)
+
+    existing_candidate_canonicals = {
+        row[0] for row in conn.execute("SELECT canonical FROM taxonomy_candidates")
+    }
+
+    analyzer.print_report(
+        df, taxonomy, existing_candidate_canonicals, LLM_CANDIDATE_THRESHOLD
+    )
+
+    output_stem = paths[0].stem if len(paths) == 1 else "jobs_all"
+    analyzer.save_excel(df, data_dir / f"{output_stem}_analysis.xlsx", taxonomy)
+    console.print("[green]Analysis completed.[/green]")
 
 
 @app.command()
@@ -224,86 +338,36 @@ def analyze(
 
         data_dir = Path(analyzer.OUTPUT_DIR)
         conn = analyzer.open_db(data_dir)
-        analyzer.init_db(conn)
+        try:
+            analyzer.init_db(conn)
 
-        if candidates:
-            analyzer.print_candidates(conn)
-            conn.close()
-            return
+            if candidates:
+                analyzer.print_candidates(conn)
+                return
 
-        promote_only = promote is not None and not file and not all_files
-        if promote_only:
-            promote_threshold = promote if promote is not None else 1
-            analyzer.apply_candidates(conn, promote_threshold)
-            conn.close()
-            return
-
-        args = argparse.Namespace(file=str(file) if file else None, all=all_files)
-        paths = analyzer._resolve_input_paths(args, data_dir)
-        if paths is None:
-            if promote is not None:
+            if promote is not None and not file and not all_files:
                 analyzer.apply_candidates(conn, promote)
-            conn.close()
-            return
+                return
 
-        if promote is not None:
-            analyzer.apply_candidates(conn, promote)
+            args = argparse.Namespace(file=str(file) if file else None, all=all_files)
+            paths = analyzer.resolve_input_paths(args, data_dir)
+            if paths is None:
+                if promote is not None:
+                    analyzer.apply_candidates(conn, promote)
+                return
 
-        taxonomy = analyzer.load_taxonomy(conn)
-        term_count = sum(len(terms) for terms in taxonomy.values())
-        console.print(
-            f"Taxonomy loaded: {term_count} terms (+ aliases) across {len(taxonomy)} categories"
-        )
-
-        console.print(f"Loading from: {[str(p) for p in paths]}")
-        jobs = analyzer.load_jobs(paths)
-        console.print(f"Loaded {len(jobs)} unique jobs.")
-
-        if title_contains:
-            jobs = [
-                j
-                for j in jobs
-                if title_contains.lower() in (j.get("job_title") or "").lower()
-            ]
-            console.print(f"After title filter '{title_contains}': {len(jobs)} jobs")
-        if location_contains:
-            jobs = [
-                j
-                for j in jobs
-                if location_contains.lower() in (j.get("location") or "").lower()
-            ]
-            console.print(
-                f"After location filter '{location_contains}': {len(jobs)} jobs"
+            _run_analysis_pipeline(
+                analyzer,
+                conn,
+                paths,
+                data_dir,
+                promote,
+                llm,
+                title_contains,
+                location_contains,
             )
-
-        if not jobs:
+        finally:
             conn.close()
-            return
-
-        llm_client = None
-        if llm:
-            llm_client = analyzer._build_llm_client(
-                analyzer.NINEROUTER_BASE_URL,
-                analyzer.NINEROUTER_MODEL,
-            )
-
-        df = analyzer.analyze(jobs, taxonomy, llm_client=llm_client, conn=conn)
-
-        if llm and llm_client:
-            analyzer.promote_llm_to_candidates(conn, threshold=2)
-
-        existing_candidate_canonicals = {
-            row[0] for row in conn.execute("SELECT canonical FROM taxonomy_candidates")
-        }
-        candidate_threshold = 2
-        conn.close()
-        analyzer.print_report(
-            df, taxonomy, existing_candidate_canonicals, candidate_threshold
-        )
-
-        output_stem = paths[0].stem if len(paths) == 1 else "jobs_all"
-        analyzer.save_excel(df, data_dir / f"{output_stem}_analysis.xlsx", taxonomy)
-        console.print("[green]Analysis completed.[/green]")
     except Exception as exc:  # noqa: BLE001
         console.print(f"[red]analyze failed:[/red] {exc}")
         raise typer.Exit(code=1) from exc

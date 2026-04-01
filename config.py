@@ -94,3 +94,6 @@ LLM_RATE_LIMIT_MAX_WAIT_SECONDS = 30
 
 # Buffer added to the parsed retry-after time so we don't hit the limit edge
 RETRY_AFTER_BUFFER_SECONDS = 2
+
+# Minimum job occurrences for a candidate term to be promoted into the taxonomy
+LLM_CANDIDATE_THRESHOLD = 2
