@@ -1,18 +1,18 @@
 from __future__ import annotations
+from typing import Coroutine, Optional, TypeVar
 
 import argparse
 import asyncio
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
-
 import typer
 from rich.console import Console
 from rich.table import Table
 from rich.traceback import install as install_rich_traceback
-
 from config import LLM_CANDIDATE_THRESHOLD
+
+T = TypeVar("T")
 
 install_rich_traceback(show_locals=False)
 
@@ -21,7 +21,7 @@ console = Console()
 
 
 @app.callback(invoke_without_command=True)
-def _default(ctx: typer.Context) -> None:
+def default_command(ctx: typer.Context) -> None:
     """Run interactive wizard when no subcommand is given."""
     if ctx.invoked_subcommand is None:
         _interactive_wizard()
@@ -113,6 +113,20 @@ def _run_command(command: list[str], label: str, cwd: Path | None = None) -> Non
         subprocess.run(command, cwd=cwd, check=True)
 
 
+def _ensure_venv(venv_path: Path, python: str, repo_root: Path) -> tuple[str, str, str]:
+    """Create virtualenv if missing and return summary row tuple."""
+    venv_python = _venv_python(venv_path)
+    if venv_python.exists():
+        return ("Create venv", "[yellow]skip[/yellow]", f"exists: {venv_path}")
+
+    _run_command(
+        [python, "-m", "venv", str(venv_path)],
+        "Creating virtual environment",
+        cwd=repo_root,
+    )
+    return ("Create venv", "[green]done[/green]", str(venv_path))
+
+
 def _deps_installed(venv_python: Path) -> bool:
     probe = "import linkedin_scraper, playwright, dotenv, pandas, openpyxl, openai, typer, rich"
     try:
@@ -128,11 +142,64 @@ def _deps_installed(venv_python: Path) -> bool:
         return False
 
 
+def _ensure_dependencies(venv_python: Path, repo_root: Path) -> tuple[str, str, str]:
+    """Install requirements when missing and return summary row tuple."""
+    if _deps_installed(venv_python):
+        return (
+            "Install dependencies",
+            "[yellow]skip[/yellow]",
+            "requirements already satisfied",
+        )
+
+    _run_command(
+        [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
+        "Installing dependencies",
+        cwd=repo_root,
+    )
+    return (
+        "Install dependencies",
+        "[green]done[/green]",
+        "pip install -r requirements.txt",
+    )
+
+
 def _chromium_installed() -> bool:
     cache_dir = Path.home() / ".cache" / "ms-playwright"
     if not cache_dir.exists():
         return False
     return any(path.name.startswith("chromium-") for path in cache_dir.iterdir())
+
+
+def _ensure_chromium(venv_python: Path, repo_root: Path) -> tuple[str, str, str]:
+    """Install Playwright Chromium when missing and return summary row tuple."""
+    if _chromium_installed():
+        return (
+            "Install Chromium",
+            "[yellow]skip[/yellow]",
+            "Playwright Chromium already present",
+        )
+
+    _run_command(
+        [str(venv_python), "-m", "playwright", "install", "chromium"],
+        "Installing Playwright Chromium",
+        cwd=repo_root,
+    )
+    return ("Install Chromium", "[green]done[/green]", "playwright install chromium")
+
+
+def _ensure_session(
+    venv_python: Path, repo_root: Path, session_file: str
+) -> tuple[str, str, str]:
+    """Run session setup only when session file is missing."""
+    session_path = repo_root / session_file
+    if session_path.exists():
+        return ("Setup session", "[yellow]skip[/yellow]", f"exists: {session_file}")
+
+    console.print(
+        "[cyan]Session file missing. Starting interactive setup-session...[/cyan]"
+    )
+    subprocess.run([str(venv_python), "setup_session.py"], cwd=repo_root, check=True)
+    return ("Setup session", "[green]done[/green]", session_file)
 
 
 def _show_auto_summary(rows: list[tuple[str, str, str]]) -> None:
@@ -161,7 +228,7 @@ def setup_session_command() -> None:
         raise typer.Exit(code=1) from exc
 
 
-def _run_async(coro):
+def _run_async(coro: Coroutine[object, object, T]) -> T:
     """Run an async coroutine, suppressing Playwright teardown noise on Ctrl+C."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -277,6 +344,7 @@ def _run_analysis_pipeline(
         llm_client = analyzer.build_llm_client(
             analyzer.NINEROUTER_BASE_URL,
             analyzer.NINEROUTER_MODEL,
+            analyzer.NINEROUTER_API_KEY,
         )
 
     df = analyzer.analyze(jobs, skills, llm_client=llm_client, conn=conn)
@@ -394,77 +462,14 @@ def auto(
     venv_python = _venv_python(venv_path)
 
     try:
-        if not venv_python.exists():
-            _run_command(
-                [python, "-m", "venv", str(venv_path)],
-                "Creating virtual environment",
-                cwd=repo_root,
-            )
-            rows.append(("Create venv", "[green]done[/green]", str(venv_path)))
-        else:
-            rows.append(
-                ("Create venv", "[yellow]skip[/yellow]", f"exists: {venv_path}")
-            )
+        rows.append(_ensure_venv(venv_path, python, repo_root))
 
-        if _deps_installed(venv_python):
-            rows.append(
-                (
-                    "Install dependencies",
-                    "[yellow]skip[/yellow]",
-                    "requirements already satisfied",
-                )
-            )
-        else:
-            _run_command(
-                [str(venv_python), "-m", "pip", "install", "-r", "requirements.txt"],
-                "Installing dependencies",
-                cwd=repo_root,
-            )
-            rows.append(
-                (
-                    "Install dependencies",
-                    "[green]done[/green]",
-                    "pip install -r requirements.txt",
-                )
-            )
-
-        if _chromium_installed():
-            rows.append(
-                (
-                    "Install Chromium",
-                    "[yellow]skip[/yellow]",
-                    "Playwright Chromium already present",
-                )
-            )
-        else:
-            _run_command(
-                [str(venv_python), "-m", "playwright", "install", "chromium"],
-                "Installing Playwright Chromium",
-                cwd=repo_root,
-            )
-            rows.append(
-                (
-                    "Install Chromium",
-                    "[green]done[/green]",
-                    "playwright install chromium",
-                )
-            )
+        rows.append(_ensure_dependencies(venv_python, repo_root))
+        rows.append(_ensure_chromium(venv_python, repo_root))
 
         from config import JOBS_PER_QUERY, SESSION_FILE
 
-        session_path = repo_root / SESSION_FILE
-        if session_path.exists():
-            rows.append(
-                ("Setup session", "[yellow]skip[/yellow]", f"exists: {SESSION_FILE}")
-            )
-        else:
-            console.print(
-                "[cyan]Session file missing. Starting interactive setup-session...[/cyan]"
-            )
-            subprocess.run(
-                [str(venv_python), "setup_session.py"], cwd=repo_root, check=True
-            )
-            rows.append(("Setup session", "[green]done[/green]", SESSION_FILE))
+        rows.append(_ensure_session(venv_python, repo_root, SESSION_FILE))
 
         scrape_limit = limit if limit is not None else JOBS_PER_QUERY
         scrape_cmd = [str(venv_python), "scrape.py", "--limit", str(scrape_limit)]

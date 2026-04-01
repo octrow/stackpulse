@@ -34,19 +34,35 @@ stackpulse/
 
 ## Setup
 
-```bash
-pip install -r requirements.txt
-playwright install chromium
+Recommended (repo launcher + one-time install):
 
+```bash
 cp .env.example .env
 # fill in LINKEDIN_EMAIL and LINKEDIN_PASSWORD
+
+./install.sh
+stackpulse --help
 ```
 
-(Optional, for installable `stackpulse` command):
+What this does:
+- `install.sh` creates `~/.local/bin/stackpulse` symlink to this repo launcher
+- launcher auto-creates `.venv` on first run
+- launcher auto-installs dependencies when missing
+- launcher auto-installs Playwright Chromium when missing
+
+Optional packaging-based install (alternative):
 
 ```bash
 pip install -e .
 ```
+
+If `stackpulse` is still not found, add this to your shell profile (`~/.bashrc` or `~/.zshrc`):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then reload shell config (`source ~/.bashrc` or `source ~/.zshrc`).
 
 ---
 
@@ -97,7 +113,7 @@ You can still run legacy script entrypoints (`py setup_session.py`, `py scrape.p
 
 ### Shell completion
 
-Requires `pip install -e .` first (adds `stackpulse` to `$PATH`).
+Requires a working `stackpulse` command in `$PATH` (via `./install.sh` symlink setup or `pip install -e .`).
 
 ```bash
 stackpulse --install-completion   # install tab completion for your current shell
@@ -348,7 +364,7 @@ by
 Add term without code change:
 
 ```bash
-sqlite3 data/skills.db "INSERT OR IGNORE INTO skills(category,term) VALUES('Cloud','hetzner')"
+sqlite3 data/skills.db "INSERT OR IGNORE INTO skills(category_id,term) SELECT id,'hetzner' FROM categories WHERE name='Cloud'"
 ```
 
 Add alias (e.g. multilingual synonym):
@@ -368,7 +384,7 @@ sqlite3 data/skills.db "SELECT skill, COUNT(DISTINCT url_key) jobs FROM llm_resu
 Promotion queue view:
 
 ```bash
-sqlite3 data/skills.db "SELECT term, category, jobs_count, status FROM skill_candidates ORDER BY jobs_count DESC"
+sqlite3 data/skills.db "SELECT sc.term, c.name AS category, sc.jobs_count, sc.status FROM skill_candidates sc JOIN categories c ON c.id=sc.category_id ORDER BY sc.jobs_count DESC"
 ```
 
 ---

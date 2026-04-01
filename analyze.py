@@ -32,9 +32,21 @@ from argparse import Namespace
 from collections import Counter
 from datetime import date
 from pathlib import Path
-
+from urllib.parse import urlsplit
 import pandas as pd
 
+from config import (
+    OUTPUT_DIR,
+    NINEROUTER_BASE_URL,
+    NINEROUTER_MODEL,
+    NINEROUTER_FALLBACK_MODEL,
+    NINEROUTER_API_KEY,
+    LLM_RATE_LIMIT_MAX_WAIT_SECONDS,
+    LLM_MAX_INPUT_CHARS,
+    LLM_MAX_OUTPUT_TOKENS,
+    RETRY_AFTER_BUFFER_SECONDS,
+    LLM_CANDIDATE_THRESHOLD,
+)
 from analysis_candidates import (
     SKIP_TERMS,
     apply_candidates,
@@ -43,17 +55,7 @@ from analysis_candidates import (
 )
 from analysis_db import init_db, load_skills, normalize_term, open_db
 from analysis_llm_cache import _llm_cache_get, _llm_cache_set, _url_key
-from config import (
-    OUTPUT_DIR,
-    NINEROUTER_BASE_URL,
-    NINEROUTER_MODEL,
-    NINEROUTER_FALLBACK_MODEL,
-    LLM_RATE_LIMIT_MAX_WAIT_SECONDS,
-    LLM_MAX_INPUT_CHARS,
-    LLM_MAX_OUTPUT_TOKENS,
-    RETRY_AFTER_BUFFER_SECONDS,
-    LLM_CANDIDATE_THRESHOLD,
-)
+
 
 # ── Display formatting constants ──────────────────────────────────────────────
 
@@ -65,6 +67,31 @@ _REPORT_TOP_CATEGORIES_COUNT = 8
 _REPORT_TOP_LOCATIONS_COUNT = 15
 _REPORT_TOP_SALARY_COUNT = 20
 _REPORT_TOP_MISSING_SKILLS_COUNT = 50
+
+_LINKEDIN_JOB_ID_RE = re.compile(r"/jobs/view/(\d+)")
+
+
+def _canonical_url_key(url: str | None) -> str | None:
+    """Return stable dedupe key for a LinkedIn job URL."""
+    if not url:
+        return None
+
+    stripped = url.strip()
+    if not stripped:
+        return None
+
+    parsed = urlsplit(stripped)
+    path = (parsed.path or "").rstrip("/")
+
+    match = _LINKEDIN_JOB_ID_RE.search(path)
+    if match:
+        return f"li-job:{match.group(1)}"
+
+    host = (parsed.netloc or "").lower()
+    if not host and parsed.path:
+        host = "linkedin.com"
+
+    return f"{host}{path}" if path else host
 
 
 # ── LLM extraction ────────────────────────────────────────────────────────────
@@ -332,13 +359,17 @@ def load_jobs(paths: list[Path]) -> list[dict]:
     for path in paths:
         with open(path, encoding="utf-8") as file_handle:
             all_jobs.extend(json.load(file_handle))
-    seen_urls: set[str] = set()
+    seen_url_keys: set[str] = set()
     deduplicated_jobs = []
     for job in all_jobs:
-        url = job.get("linkedin_url", "")
-        if url not in seen_urls:
-            seen_urls.add(url)
+        url_key = _canonical_url_key(job.get("linkedin_url"))
+        if not url_key:
             deduplicated_jobs.append(job)
+            continue
+        if url_key in seen_url_keys:
+            continue
+        seen_url_keys.add(url_key)
+        deduplicated_jobs.append(job)
     return deduplicated_jobs
 
 
@@ -757,12 +788,12 @@ def resolve_input_paths(args: Namespace, data_dir: Path) -> list[Path] | None:
     return [latest_file]
 
 
-def build_llm_client(base_url: str, model: str):
+def build_llm_client(base_url: str, model: str, api_key: str):
     """Initialise and return an OpenAI-compatible client for 9router, or None on failure."""
     try:
         from openai import OpenAI
 
-        client = OpenAI(base_url=base_url, api_key="local")
+        client = OpenAI(base_url=base_url, api_key=api_key)
         print(f"LLM extraction enabled → {model} via 9router")
         return client
     except ImportError:
@@ -844,7 +875,11 @@ def main() -> None:
 
         llm_client = None
         if args.llm:
-            llm_client = build_llm_client(NINEROUTER_BASE_URL, NINEROUTER_MODEL)
+            llm_client = build_llm_client(
+                NINEROUTER_BASE_URL,
+                NINEROUTER_MODEL,
+                NINEROUTER_API_KEY,
+            )
 
         df = analyze(jobs, skills, llm_client=llm_client, conn=conn)
 

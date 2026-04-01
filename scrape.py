@@ -229,7 +229,7 @@ def _initialise_scrape_state(
 
     if fresh:
         log.info("--fresh: ignoring all previous results")
-        return set(), all_jobs
+        return set(), []
 
     backfilled = _backfill_scraped_job_keys_if_empty(conn)
     seen_keys = load_db_scraped_url_keys(conn)

@@ -82,6 +82,9 @@ NINEROUTER_MODEL = "groq/llama-3.3-70b-versatile"
 #   Fireworks/Llama-3.3-70B → Gemini-cli/Gemini-3-Flash → Kiro/Claude-Haiku-4.5
 NINEROUTER_FALLBACK_MODEL = "9router-combo"
 
+# API key passed to the OpenAI-compatible client for 9router/local gateways.
+NINEROUTER_API_KEY = "local"
+
 # Maximum characters of job description text sent to the LLM
 LLM_MAX_INPUT_CHARS = 8_000
 
