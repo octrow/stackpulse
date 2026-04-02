@@ -1,11 +1,33 @@
 from __future__ import annotations
 
+import os
+import random
 from collections.abc import Iterable
 
 from rich import box
+from rich._spinners import SPINNERS
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
+
+if "stackpulse_floral" not in SPINNERS:
+    SPINNERS["stackpulse_floral"] = {
+        "interval": 100,
+        "frames": "·✻✽✶✳✢",
+    }
+
+WHIMSICAL_VERBS = (
+    "Thinking",
+    "Pondering",
+    "Reticulating",
+    "Brewing",
+    "Synthesizing",
+    "Synthesising",
+    "Weaving",
+    "Distilling",
+    "Gathering signals",
+    "Scanning listings",
+)
 
 console = Console()
 _DISPLAY_MODE = "detailed"
@@ -76,3 +98,35 @@ def metric_title(text: str) -> str:
 
 def help_hint(text: str) -> None:
     console.print(f"[dim]… {text}[/dim]")
+
+
+def status_spinner_name() -> str:
+    raw = os.environ.get("STACKPULSE_STATUS_SPINNER", "stackpulse_floral")
+    name = raw.strip().lower()
+    if name == "dots":
+        return "dots"
+    return "stackpulse_floral"
+
+
+def status_message_explicit(label: str) -> str:
+    base = label.rstrip(".").strip()
+    return f"[bold white]{base}..."
+
+
+def status_message_whimsical_then_explicit(label: str) -> str:
+    """Random whimsical verb plus the concrete step (bootstrap, setup-session, etc.)."""
+    verb = random.choice(WHIMSICAL_VERBS)
+    base = label.rstrip(".").strip()
+    return f"[bold white]{verb}...[/bold white] [cyan]· {base}[/cyan]"
+
+
+def status_message_whimsical() -> str:
+    verb = random.choice(WHIMSICAL_VERBS)
+    return f"[bold white]{verb}..."
+
+
+def status_message_whimsical_with_hint(hint: str) -> str:
+    verb = random.choice(WHIMSICAL_VERBS)
+    hint_clean = hint.strip()
+    # cyan hint so it stays readable on dark terminals (plain [dim] often vanishes)
+    return f"[bold white]{verb}...[/bold white] [cyan]— {hint_clean}[/cyan]"

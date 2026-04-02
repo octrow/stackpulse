@@ -29,6 +29,9 @@ from ui_rich import (
     print_success,
     print_warning,
     set_display_mode,
+    status_message_whimsical_then_explicit,
+    status_message_whimsical_with_hint,
+    status_spinner_name,
 )
 
 T = TypeVar("T")
@@ -73,9 +76,11 @@ def review_skills_command() -> None:
                 "Bulk: promote every pending term with jobs_count ≥ N. "
                 "Individual: step through each term."
             )
-            mode = typer.prompt(
-                "[b]ulk  [i]ndividual  [q]uit", default="i"
-            ).strip().lower()[:1]
+            mode = (
+                typer.prompt("[b]ulk  [i]ndividual  [q]uit", default="i")
+                .strip()
+                .lower()[:1]
+            )
             if mode == "q":
                 return
             if mode == "b":
@@ -110,10 +115,14 @@ def _walkthrough_skill_candidates(conn, pending: list) -> None:
             ],
             style="cyan",
         )
-        action = typer.prompt(
-            "[a]pprove  [r]eject  [s]kip  [q]uit",
-            default="a",
-        ).strip().lower()[:1]
+        action = (
+            typer.prompt(
+                "[a]pprove  [r]eject  [s]kip  [q]uit",
+                default="a",
+            )
+            .strip()
+            .lower()[:1]
+        )
         if action == "a":
             if approve_candidate(conn, row["term"], row["category_id"]):
                 conn.commit()
@@ -168,9 +177,7 @@ def _interactive_wizard() -> None:
             "Default: fast (HTTP guest, no login, fastest). "
             "Optional: browser = Patchright + session — use when you need applicant_count / logged-in DOM."
         )
-        mode_raw = typer.prompt(
-            "Mode [fast/browser]", default="fast"
-        ).strip().lower()
+        mode_raw = typer.prompt("Mode [fast/browser]", default="fast").strip().lower()
         mode = mode_raw if mode_raw in ("browser", "fast") else "fast"
         scrape(limit=limit, fresh=fresh, mode=mode)
 
@@ -185,9 +192,7 @@ def _interactive_wizard() -> None:
         print_info(
             "Default: fast (HTTP guest). Optional browser = Patchright + session for applicant_count / richer pages."
         )
-        mode_raw = typer.prompt(
-            "Mode [fast/browser]", default="fast"
-        ).strip().lower()
+        mode_raw = typer.prompt("Mode [fast/browser]", default="fast").strip().lower()
         mode = mode_raw if mode_raw in ("browser", "fast") else "fast"
         all_files = typer.confirm("Analyze all jobs files (--all)?", default=True)
         llm = typer.confirm("Enable LLM extraction (--llm)?", default=False)
@@ -243,7 +248,9 @@ def _venv_python(venv_path: Path) -> Path:
 
 def _run_command(command: list[str], label: str, cwd: Path | None = None) -> None:
     cwd = cwd or _repo_root()
-    with console.status(f"[bold cyan]{label}...", spinner="dots"):
+    with console.status(
+        status_message_whimsical_then_explicit(label), spinner=status_spinner_name()
+    ):
         subprocess.run(command, cwd=cwd, check=True)
 
 
@@ -359,7 +366,8 @@ def setup_session_command() -> None:
         from setup_session import main as setup_session_main
 
         with console.status(
-            "[bold cyan]Running LinkedIn session setup...", spinner="dots"
+            status_message_whimsical_then_explicit("Running LinkedIn session setup"),
+            spinner=status_spinner_name(),
         ):
             asyncio.run(setup_session_main())
         print_success("Session setup complete.")
@@ -437,7 +445,10 @@ def scrape(
             print_error("Invalid --mode: use 'browser' or 'fast'.")
             raise typer.Exit(code=2)
 
-        with console.status("[bold cyan]Running scrape workflow...", spinner="dots"):
+        with console.status(
+            status_message_whimsical_with_hint("scraping"),
+            spinner=status_spinner_name(),
+        ):
             if mode_norm == "fast":
                 from scrape_fast import scrape_all_fast
 
@@ -557,7 +568,8 @@ def _run_analysis_pipeline(
         )
     else:
         with console.status(
-            "[bold cyan]Analyzing jobs and extracting skills...", spinner="dots"
+            status_message_whimsical_with_hint("analyzing"),
+            spinner=status_spinner_name(),
         ):
             df = analyzer.analyze(
                 jobs,
@@ -681,9 +693,7 @@ def analyze(
                 location_contains,
                 verbose=verbose if isinstance(verbose, bool) else True,
                 activity_log_file=(
-                    activity_log_file
-                    if isinstance(activity_log_file, bool)
-                    else True
+                    activity_log_file if isinstance(activity_log_file, bool) else True
                 ),
             )
         finally:

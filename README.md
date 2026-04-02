@@ -84,6 +84,8 @@ Then reload shell config (`source ~/.bashrc` or `source ~/.zshrc`).
 
 ## CLI (Typer + Rich)
 
+Long-running steps show a **floral** status spinner (Unicode frames) plus a **whimsical** verb paired with the real task (venv install, session setup, scrape, or `analyze --no-verbose`). The task name uses cyan so it stays readable next to the verb. To use Rich’s classic dot spinner instead, set `STACKPULSE_STATUS_SPINNER=dots` in the environment.
+
 Running `stackpulse` with no arguments launches an **interactive wizard** that prompts for command and options:
 
 ```
