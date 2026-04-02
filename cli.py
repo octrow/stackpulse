@@ -7,17 +7,24 @@ import subprocess
 import sys
 from pathlib import Path
 import typer
-from rich.console import Console
-from rich.table import Table
 from rich.traceback import install as install_rich_traceback
 from config import LLM_CANDIDATE_THRESHOLD
+from ui_rich import (
+    console,
+    make_table,
+    print_error,
+    print_info,
+    print_panel,
+    print_section,
+    print_success,
+    print_warning,
+)
 
 T = TypeVar("T")
 
 install_rich_traceback(show_locals=False)
 
 app = typer.Typer(help="StackPulse CLI", invoke_without_command=True)
-console = Console()
 
 
 @app.callback(invoke_without_command=True)
@@ -29,7 +36,9 @@ def default_command(ctx: typer.Context) -> None:
 
 def _interactive_wizard() -> None:
     """Prompt the user for what to run when stackpulse is called with no args."""
-    console.print("\n[bold cyan]StackPulse[/bold cyan] — what would you like to do?\n")
+    print_section("StackPulse")
+    print_info("What would you like to do?")
+    console.print()
     console.print("  1  analyze        Analyze scraped jobs and export stats")
     console.print("  2  scrape         Scrape LinkedIn for new jobs")
     console.print("  3  auto           Bootstrap + scrape + analyze end-to-end")
@@ -195,21 +204,20 @@ def _ensure_session(
     if session_path.exists():
         return ("Setup session", "[yellow]skip[/yellow]", f"exists: {session_file}")
 
-    console.print(
-        "[cyan]Session file missing. Starting interactive setup-session...[/cyan]"
-    )
+    print_info("Session file missing. Starting interactive setup-session...")
     subprocess.run([str(venv_python), "setup_session.py"], cwd=repo_root, check=True)
     return ("Setup session", "[green]done[/green]", session_file)
 
 
 def _show_auto_summary(rows: list[tuple[str, str, str]]) -> None:
-    table = Table(title="Auto workflow summary")
+    table = make_table("Auto workflow summary", expand=True)
     table.add_column("Step", style="bold")
     table.add_column("Status")
-    table.add_column("Details")
+    table.add_column("Details", overflow="fold")
     for step, status, details in rows:
         table.add_row(step, status, details)
     console.print(table)
+    print_success("Auto workflow summary complete.")
 
 
 @app.command("setup-session")
@@ -222,9 +230,9 @@ def setup_session_command() -> None:
             "[bold cyan]Running LinkedIn session setup...", spinner="dots"
         ):
             asyncio.run(setup_session_main())
-        console.print("[green]Session setup complete.[/green]")
+        print_success("Session setup complete.")
     except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]setup-session failed:[/red] {exc}")
+        print_error(f"setup-session failed: {exc}")
         raise typer.Exit(code=1) from exc
 
 
@@ -285,12 +293,12 @@ def scrape(
         effective_limit = limit if limit is not None else JOBS_PER_QUERY
         with console.status("[bold cyan]Running scrape workflow...", spinner="dots"):
             _run_async(scrape_all(limit_per_query=effective_limit, fresh=fresh))
-        console.print("[green]Scrape completed.[/green]")
+        print_success("Scrape completed.")
     except KeyboardInterrupt as exc:
-        console.print("[yellow]Scrape interrupted by user.[/yellow]")
+        print_warning("Scrape interrupted by user.")
         raise typer.Exit(code=130) from exc
     except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]scrape failed:[/red] {exc}")
+        print_error(f"scrape failed: {exc}")
         raise typer.Exit(code=1) from exc
 
 
@@ -308,18 +316,26 @@ def _run_analysis_pipeline(
 
     Assumes DB is open; does NOT close it (caller's responsibility via try/finally).
     """
+    print_section("Analyze Pipeline")
+    print_info("Preparing analysis context")
+
     if promote is not None:
         analyzer.apply_candidates(conn, promote)
 
     skills = analyzer.load_skills(conn)
     term_count = sum(len(terms) for terms in skills.values())
-    console.print(
-        f"Skills loaded: {term_count} terms (+ aliases) across {len(skills)} categories"
-    )
 
-    console.print(f"Loading from: {[str(p) for p in paths]}")
     jobs = analyzer.load_jobs(paths)
-    console.print(f"Loaded {len(jobs)} unique jobs.")
+
+    summary = make_table("Run Summary", expand=True)
+    summary.add_column("Metric", style="bold")
+    summary.add_column("Value")
+    summary.add_row("Input files", str(len(paths)))
+    summary.add_row("Unique jobs loaded", str(len(jobs)))
+    summary.add_row("Skills catalog terms", str(term_count))
+    summary.add_row("Skill categories", str(len(skills)))
+    summary.add_row("LLM mode", "enabled" if use_llm else "disabled")
+    console.print(summary)
 
     if title_contains:
         jobs = [
@@ -327,16 +343,17 @@ def _run_analysis_pipeline(
             for j in jobs
             if title_contains.lower() in (j.get("job_title") or "").lower()
         ]
-        console.print(f"After title filter '{title_contains}': {len(jobs)} jobs")
+        print_info(f"Title filter '{title_contains}' → {len(jobs)} jobs")
     if location_contains:
         jobs = [
             j
             for j in jobs
             if location_contains.lower() in (j.get("location") or "").lower()
         ]
-        console.print(f"After location filter '{location_contains}': {len(jobs)} jobs")
+        print_info(f"Location filter '{location_contains}' → {len(jobs)} jobs")
 
     if not jobs:
+        print_warning("No jobs left after filters. Nothing to analyze.")
         return
 
     llm_client = None
@@ -347,7 +364,10 @@ def _run_analysis_pipeline(
             analyzer.NINEROUTER_API_KEY,
         )
 
-    df = analyzer.analyze(jobs, skills, llm_client=llm_client, conn=conn)
+    with console.status(
+        "[bold cyan]Analyzing jobs and extracting skills...", spinner="dots"
+    ):
+        df = analyzer.analyze(jobs, skills, llm_client=llm_client, conn=conn)
 
     if use_llm and llm_client:
         analyzer.promote_llm_to_candidates(conn, threshold=LLM_CANDIDATE_THRESHOLD)
@@ -359,8 +379,17 @@ def _run_analysis_pipeline(
     analyzer.print_report(df, skills, existing_candidate_terms, LLM_CANDIDATE_THRESHOLD)
 
     output_stem = paths[0].stem if len(paths) == 1 else "jobs_all"
-    analyzer.save_excel(df, data_dir / f"{output_stem}_analysis.xlsx", skills)
-    console.print("[green]Analysis completed.[/green]")
+    output_path = data_dir / f"{output_stem}_analysis.xlsx"
+    analyzer.save_excel(df, output_path, skills)
+    print_panel(
+        "Analyze Completed",
+        [
+            f"Rows analyzed: {len(df)}",
+            f"Export: {output_path}",
+        ],
+        style="green",
+    )
+    print_success("Analysis completed.")
 
 
 @app.command()
@@ -394,7 +423,7 @@ def analyze(
 ) -> None:
     """Analyze scraped jobs and export Excel output."""
     if file and all_files:
-        console.print("[red]Use either --file or --all, not both.[/red]")
+        print_error("Use either --file or --all, not both.")
         raise typer.Exit(code=1)
 
     try:
@@ -433,7 +462,7 @@ def analyze(
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001
-        console.print(f"[red]analyze failed:[/red] {exc}")
+        print_error(f"analyze failed: {exc}")
         raise typer.Exit(code=1) from exc
 
 
@@ -498,7 +527,7 @@ def auto(
         )
 
         _show_auto_summary(rows)
-        console.print("[bold green]Auto workflow completed.[/bold green]")
+        print_success("Auto workflow completed.")
     except subprocess.CalledProcessError as exc:
         rows.append(
             (
@@ -521,9 +550,7 @@ def main() -> None:
         typo_dash = any(arg == "-llm" for arg in argv[1:])
         typo_positional = len(argv) >= 2 and argv[1] == "llm"
         if typo_dash or typo_positional:
-            console.print(
-                "[red]Invalid LLM flag usage.[/red] Use: [bold]stackpulse analyze --llm[/bold]"
-            )
+            print_error("Invalid LLM flag usage. Use: stackpulse analyze --llm")
             sys.exit(2)
 
     app()

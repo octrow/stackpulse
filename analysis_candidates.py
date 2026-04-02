@@ -4,6 +4,14 @@ from datetime import date
 
 from config import LLM_CANDIDATE_THRESHOLD
 from analysis_db import normalize_term
+from ui_rich import (
+    console,
+    make_table,
+    print_info,
+    print_panel,
+    print_success,
+    print_warning,
+)
 
 # ── Candidate promotion constants ─────────────────────────────────────────────
 
@@ -35,8 +43,6 @@ SKIP_TERMS: set[str] = {
     "agentic systems",
     "autonomous ai agents",
 }
-
-_REPORT_CATEGORY_WIDTH = 30
 
 
 def promote_llm_to_candidates(
@@ -120,8 +126,8 @@ def promote_llm_to_candidates(
     pending_count = conn.execute(
         "SELECT COUNT(*) FROM skill_candidates WHERE status='pending'"
     ).fetchone()[0]
-    print(
-        f"  [Candidates queue] {newly_added_count} new, {updated_count} updated "
+    print_info(
+        f"[Candidates queue] {newly_added_count} new, {updated_count} updated "
         f"(threshold >=\u2009{threshold} jobs) → {pending_count} pending review rows"
     )
     return newly_added_count
@@ -142,17 +148,26 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
     ).fetchall()
 
     if not candidate_rows:
-        print(f"  [Promote] No pending candidates with jobs_count >= {min_jobs}.")
+        print_warning(f"[Promote] No pending candidates with jobs_count >= {min_jobs}.")
         return 0
 
-    print(
-        f"\n  [Promote] Adding {len(candidate_rows)} terms to skills (threshold >=\u2009{min_jobs} jobs):"
+    print_panel(
+        "Promote Candidates",
+        [
+            f"Adding {len(candidate_rows)} terms to skills",
+            f"Threshold: >= {min_jobs} jobs",
+        ],
+        style="cyan",
     )
-    print(f"  {'Term':<28} {'Category':<32} {'Jobs'}")
-    print(f"  {'-' * 28} {'-' * 32} {'-' * 4}")
+
+    table = make_table("Candidates to promote", expand=True)
+    table.add_column("Term", style="bold")
+    table.add_column("Category", overflow="fold")
+    table.add_column("Jobs", justify="right")
+
     today = date.today().isoformat()
     for row in candidate_rows:
-        print(f"  {row['term']:<28} {row['category']:<32} {row['jobs_count']}")
+        table.add_row(row["term"], row["category"], str(row["jobs_count"]))
         conn.execute(
             "INSERT OR IGNORE INTO skills(category_id, term) VALUES (?,?)",
             (row["category_id"], row["term"]),
@@ -164,7 +179,9 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
             (today, row["term"], row["category_id"]),
         )
 
+    console.print(table)
     conn.commit()
+    print_success(f"Promoted {len(candidate_rows)} term(s).")
     return len(candidate_rows)
 
 
@@ -182,34 +199,41 @@ def print_candidates(conn: sqlite3.Connection) -> None:
     ).fetchall()
 
     if not rows:
-        print("No skill candidates found. Run: py analyze.py --llm")
+        print_warning("No skill candidates found. Run: py analyze.py --llm")
         return
 
     status_counts: Counter = Counter(row["status"] for row in rows)
-    print(
-        f"\nSkill candidates (all statuses): {len(rows)} total  "
-        f"({status_counts.get('pending', 0)} pending, "
-        f"{status_counts.get('approved', 0)} approved, "
-        f"{status_counts.get('rejected', 0)} rejected)"
+    print_panel(
+        "Skill Candidates Queue",
+        [
+            f"Total: {len(rows)}",
+            f"Pending: {status_counts.get('pending', 0)}",
+            f"Approved: {status_counts.get('approved', 0)}",
+            f"Rejected: {status_counts.get('rejected', 0)}",
+        ],
+        style="cyan",
     )
-    print(
-        "  Note: this queue summary is separate from skills/alias coverage gaps shown in --llm output."
+    print_info(
+        "Queue summary is separate from skills/alias coverage gaps shown in --llm output."
     )
 
     pending_rows = [row for row in rows if row["status"] == "pending"]
     if pending_rows:
-        print(
-            f"\n  {'Term':<25} {'Category':<{_REPORT_CATEGORY_WIDTH}} {'LLM Cat':<15} {'Jobs'}"
-        )
-        print(f"  {'-' * 25} {'-' * _REPORT_CATEGORY_WIDTH} {'-' * 15} {'-' * 4}")
+        table = make_table("Pending candidates", expand=True)
+        table.add_column("Term", style="bold")
+        table.add_column("Category", overflow="fold")
+        table.add_column("LLM category", overflow="fold")
+        table.add_column("Jobs", justify="right")
         for row in pending_rows:
-            print(
-                f"  {row['term']:<25} {row['category']:<{_REPORT_CATEGORY_WIDTH}} "
-                f"{row['llm_category']:<15} {row['jobs_count']}"
+            table.add_row(
+                row["term"],
+                row["category"],
+                row["llm_category"],
+                str(row["jobs_count"]),
             )
+        console.print(table)
 
-    print("\nTo promote all pending (>= 2 jobs):   py analyze.py --promote")
-    print(
-        "To reject a term:  sqlite3 data/skills.db "
-        "\"UPDATE skill_candidates SET status='rejected' WHERE term='<term>'\""
+    print_info("To promote all pending (>= 2 jobs): py analyze.py --promote")
+    print_info(
+        "To reject a term: sqlite3 data/skills.db \"UPDATE skill_candidates SET status='rejected' WHERE term='<term>'\""
     )

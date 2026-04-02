@@ -25,25 +25,31 @@ stackpulse auto --limit 3 --all
 # Troubleshooting PATH (if stackpulse not found)
 export PATH="$HOME/.local/bin:$PATH"
 ```
+
 # One-time login (legacy script entrypoint still supported)
+
 py setup_session.py
 
 # Scrape jobs (legacy script entrypoints)
-py scrape.py --limit 3      # test run
-py scrape.py                # full run (all queries in config.py)
-py scrape.py --fresh        # ignore all previous results
+
+py scrape.py --limit 3 # test run
+py scrape.py # full run (all queries in config.py)
+py scrape.py --fresh # ignore all previous results
 
 # Analyze collected data (legacy script entrypoints)
-py analyze.py               # today's file
-py analyze.py --all         # merge all data/jobs_*.json files
-py analyze.py --llm         # + LLM extraction via 9router, results cached in skills.db
+
+py analyze.py # today's file
+py analyze.py --all # merge all data/jobs_*.json files
+py analyze.py --llm # + LLM extraction via 9router, results cached in skills.db
 py analyze.py --all --llm
 
 # LLM → skill promotion pipeline
-py analyze.py --candidates           # inspect queue of LLM-discovered pending terms
-py analyze.py --promote              # promote pending terms (≥2 jobs) into skills catalog
-py analyze.py --promote 3            # same, threshold = 3 jobs
-py analyze.py --all --promote        # promote first, then analyze with enriched skills
+
+py analyze.py --candidates # inspect queue of LLM-discovered pending terms
+py analyze.py --promote # promote pending terms (≥2 jobs) into skills catalog
+py analyze.py --promote 3 # same, threshold = 3 jobs
+py analyze.py --all --promote # promote first, then analyze with enriched skills
+
 ```
 
 `stackpulse auto` defaults:
@@ -94,25 +100,34 @@ appear, clicks description expand buttons, and extracts fields via ordered selec
 appears, it dumps a screenshot and HTML snippet to `OUTPUT_DIR/debug/<job_id>.*`.
 
 `scrape.py` is now intentionally split into small orchestration helpers (`_search_query_urls`, `_scrape_query_urls`,
-`_log_run_summary`, etc.) to keep `scrape_all()` readable while preserving auto-resume and save-after-each-job
-semantics. Dedupe uses canonical URL keys (LinkedIn job ID when available, otherwise normalized URL path) and persists
-successful scrapes into `scraped_jobs`.
+`_log_run_summary`, etc.) plus `QueryScrapeContext` for per-query scrape state, to keep `scrape_all()` readable while
+preserving auto-resume and save-after-each-job semantics. Dedupe uses shared
+`analysis_db.canonical_linkedin_job_key()` (LinkedIn job ID when available, otherwise normalized URL path) and
+persists successful scrapes into `scraped_jobs`.
+
+`analyze.py` entrypoint flow is split into `_build_parser()`, `_handle_mode_only_paths()`, and `_load_run_context()`.
+`main()` now orchestrates these helpers, then runs analyze/report/export.
+
+`setup_session.py` credential login catches specific runtime failures (`TimeoutError`, `RuntimeError`, `ValueError`)
+before falling back to manual login.
 
 ## Data flow
 
 ```
+
 config.py (queries + timeouts + paths + LLM settings)
-  → scrape.py               loops over queries, calls JobSearchScraper → list of URLs
-  → job_scraper_direct.py   scrapes each URL → dict
-  → data/jobs_YYYY-MM-DD.json   incremental save after each job
-  → analyze.py              loads JSON(s)
-      ├─ regex-matches skills from data/skills.db → stdout report + .xlsx
-      └─ (--llm) calls configured model via 9router → open skill extraction
-                 on 429: sleeps parsed wait time (≤ LLM_RATE_LIMIT_MAX_WAIT_SECONDS) and retries once,
-                         then falls back to NINEROUTER_FALLBACK_MODEL if configured
-                 results stored in data/skills.db (llm_results table), cached per job URL
-                 → promote_llm_to_candidates() auto-queues new terms in skill_candidates
-                 → py analyze.py --promote moves approved candidates into skills
+→ scrape.py loops over queries, calls JobSearchScraper → list of URLs
+→ job_scraper_direct.py scrapes each URL → dict
+→ data/jobs_YYYY-MM-DD.json incremental save after each job
+→ analyze.py loads JSON(s)
+├─ regex-matches skills from data/skills.db → stdout report + .xlsx
+└─ (--llm) calls configured model via 9router → open skill extraction
+on 429: sleeps parsed wait time (≤ LLM_RATE_LIMIT_MAX_WAIT_SECONDS) and retries once,
+then falls back to NINEROUTER_FALLBACK_MODEL if configured
+results stored in data/skills.db (llm_results table), cached per job URL
+→ promote_llm_to_candidates() auto-queues new terms in skill_candidates
+→ py analyze.py --promote moves approved candidates into skills
+
 ```
 
 **`data/skills.db` tables:**
@@ -181,8 +196,24 @@ broad `except Exception` is not used.
 `skill_candidates`.
 
 **Public analyze API**: `resolve_input_paths(args, data_dir)` and `build_llm_client(base_url, model, api_key)` are public
-functions (no leading underscore). `cli.py` calls them directly via `import analyze as analyzer`. `_VALID_DB_TABLES` is
-an allowlist used by `_table_is_empty()` to guard against raw SQL table-name injection.
+functions (no leading underscore). `cli.py` calls them directly via `import analyze as analyzer`. Internal entrypoint
+helpers (`_build_parser`, `_handle_mode_only_paths`, `_load_run_context`) keep command-mode routing isolated.
+`_VALID_DB_TABLES` is an allowlist used by `_table_is_empty()` to guard against raw SQL table-name injection.
+
+**Shared canonical URL key helper**: `analysis_db.canonical_linkedin_job_key()` is the single source of truth for
+LinkedIn dedupe key generation and is reused by both `scrape.py` and `analyze.py`.
+
+**Scrape per-query context**: `_scrape_query_urls()` consumes a `QueryScrapeContext` dataclass instead of long positional
+argument lists; this keeps the scrape loop state explicit and reduces function-arity churn.
+
+**Extraction quality guard**: `_print_quality_summary()` handles zero-row DataFrames explicitly to avoid division-by-zero
+when reporting percentages.
+
+**LLM cache key encoding**: `_url_key()` in `analysis_llm_cache.py` hashes URL bytes with explicit UTF-8 encoding for
+deterministic behavior.
+
+**Setup-session exception scope**: credential login fallback in `setup_session.py` avoids broad `except Exception` and
+catches specific operational failures before switching to manual login.
 
 **Unified skills pipeline**: `analyze()` builds `skills_by_category` per job — regex hits merged with LLM-discovered
 terms via `_build_comprehensive_by_category()` (case-insensitive dedup). Matched terms are routed to their skills

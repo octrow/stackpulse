@@ -50,6 +50,7 @@ stackpulse --help
 ```
 
 What this does:
+
 - `install.sh` creates `~/.local/bin/stackpulse` symlink to this repo launcher
 - launcher follows symlinks to resolve the real repo path
 - launcher auto-creates `.venv` on first run
@@ -166,8 +167,9 @@ when the ledger is empty. No flag needed.
 
 Output is saved incrementally after each job to `data/jobs_YYYY-MM-DD.json`.
 
-Deduplication key is canonicalized per URL (LinkedIn job ID when available; otherwise normalized URL path), and
-persisted in `skills.db` so the same posting is skipped across days even if URL query params differ.
+Deduplication key is canonicalized via shared `analysis_db.canonical_linkedin_job_key` (LinkedIn job ID when
+available; otherwise normalized URL path), and persisted in `skills.db` so the same posting is skipped across days
+even if URL query params differ.
 
 ### 3. Analyze skills
 
@@ -211,8 +213,11 @@ against known terms first and only flags genuinely new discoveries. Results are 
 runs are instant with no API calls.
 
 After each `--llm` run, newly discovered terms (seen in ≥ `LLM_CANDIDATE_THRESHOLD` jobs, default 2) are automatically
-queued in `skill_candidates`. Because the LLM is skills-aware, uncovered terms are genuinely new
-technologies/tools — not synonyms or generic concepts.
+queued in `skill_candidates`. Because the LLM is skills-aware, uncovered terms are genuinely new technologies/tools —
+not synonyms or generic concepts.
+
+`analyze.py` now splits entrypoint orchestration into `_build_parser()`, `_handle_mode_only_paths()`, and
+`_load_run_context()` to keep mode routing, path resolution, and runtime setup easier to maintain.
 
 `--llm` prints two gap metrics: raw uncovered terms and actionable uncovered terms. Actionable terms satisfy
 `jobs_count >= threshold`, are not in `SKIP_TERMS`, and are not already present in `skill_candidates`.
@@ -273,18 +278,18 @@ sqlite3 data/skills.db "UPDATE skill_candidates SET status='rejected' WHERE term
 
 ### LLM / analysis settings
 
-| Variable                          | Default                        | Description                                        |
-|-----------------------------------|--------------------------------|----------------------------------------------------|
-| `DB_FILENAME`                     | "skills.db"                    | SQLite filename inside `OUTPUT_DIR`                |
-| `NINEROUTER_BASE_URL`             | "http://localhost:20128/v1"    | OpenAI-compatible 9router endpoint                 |
-| `NINEROUTER_MODEL`                | "groq/llama-3.3-70b-versatile" | Primary extraction model                           |
-| `NINEROUTER_FALLBACK_MODEL`       | "9router-combo"                | Fallback model/combo when primary is quota-limited |
+| Variable                          | Default                        | Description                                            |
+|-----------------------------------|--------------------------------|--------------------------------------------------------|
+| `DB_FILENAME`                     | "skills.db"                    | SQLite filename inside `OUTPUT_DIR`                    |
+| `NINEROUTER_BASE_URL`             | "http://localhost:20128/v1"    | OpenAI-compatible 9router endpoint                     |
+| `NINEROUTER_MODEL`                | "groq/llama-3.3-70b-versatile" | Primary extraction model                               |
+| `NINEROUTER_FALLBACK_MODEL`       | "9router-combo"                | Fallback model/combo when primary is quota-limited     |
 | `NINEROUTER_API_KEY`              | "local"                        | API key passed to the OpenAI-compatible 9router client |
-| `LLM_MAX_INPUT_CHARS`             | `8000`                         | Max characters sent from each posting to LLM       |
-| `LLM_MAX_OUTPUT_TOKENS`           | `1000`                         | LLM completion token cap                           |
-| `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` | `30`                           | Max retry sleep for 429 before fallback            |
-| `RETRY_AFTER_BUFFER_SECONDS`      | `2`                            | Safety buffer added to parsed retry-after          |
-| `LLM_CANDIDATE_THRESHOLD`         | `2`                            | Min job occurrences to promote a candidate term    |
+| `LLM_MAX_INPUT_CHARS`             | `8000`                         | Max characters sent from each posting to LLM           |
+| `LLM_MAX_OUTPUT_TOKENS`           | `1000`                         | LLM completion token cap                               |
+| `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` | `30`                           | Max retry sleep for 429 before fallback                |
+| `RETRY_AFTER_BUFFER_SECONDS`      | `2`                            | Safety buffer added to parsed retry-after              |
+| `LLM_CANDIDATE_THRESHOLD`         | `2`                            | Min job occurrences to promote a candidate term        |
 
 Current search targets: Berlin, Hamburg, Munich, Germany (general), Vienna, Amsterdam, Luxembourg, Barcelona, Madrid,
 London, Remote — all for senior Python/FastAPI backend roles.

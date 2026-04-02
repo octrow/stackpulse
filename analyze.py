@@ -34,6 +34,16 @@ from datetime import date
 from pathlib import Path
 import pandas as pd
 
+from ui_rich import (
+    console,
+    make_table,
+    percent_bar,
+    print_info,
+    print_panel,
+    print_section,
+    print_success,
+)
+
 from config import (
     OUTPUT_DIR,
     NINEROUTER_BASE_URL,
@@ -64,9 +74,6 @@ from analysis_llm_cache import _llm_cache_get, _llm_cache_set, _url_key
 
 # ── Display formatting constants ──────────────────────────────────────────────
 
-_REPORT_SKILL_WIDTH = 25
-_REPORT_CATEGORY_WIDTH = 30
-_REPORT_LOCATION_WIDTH = 35
 _REPORT_TOP_SKILLS_COUNT = 30
 _REPORT_TOP_CATEGORIES_COUNT = 8
 _REPORT_TOP_LOCATIONS_COUNT = 15
@@ -479,13 +486,18 @@ def _print_top_skills(df: pd.DataFrame) -> None:
         if col == "all_skills_comprehensive" and has_llm
         else "regex taxonomy"
     )
-    print(f"\nTop {_REPORT_TOP_SKILLS_COUNT} skills [{label}] across all postings:")
+
+    table = make_table(f"Top {_REPORT_TOP_SKILLS_COUNT} skills [{label}]", expand=True)
+    table.add_column("Skill", style="bold")
+    table.add_column("Jobs", justify="right")
+    table.add_column("Prevalence", justify="right")
+    table.add_column("Signal")
+
     for skill, count in all_skills.most_common(_REPORT_TOP_SKILLS_COUNT):
         percentage = count / len(df) * 100
-        percentage_bar = "█" * int(percentage / 2)
-        print(
-            f"  {skill:<{_REPORT_SKILL_WIDTH}} {count:>4} jobs  ({percentage:>5.1f}%)  {percentage_bar}"
-        )
+        table.add_row(skill, str(count), f"{percentage:.1f}%", percent_bar(percentage))
+
+    console.print(table)
 
 
 def _print_category_breakdown(
@@ -496,7 +508,10 @@ def _print_category_breakdown(
     col = "skills_by_category" if "skills_by_category" in df.columns else "skills_raw"
     skills_list: list[dict] = df[col].tolist()
 
-    print("\nBy category:")
+    table = make_table("By category", expand=True)
+    table.add_column("Category", style="bold", overflow="fold")
+    table.add_column("Top terms", overflow="fold")
+
     # Collect all categories present across jobs (taxonomy order first, then extras)
     all_categories: list[str] = list(taxonomy.keys())
     extra = {cat for row in skills_list for cat in row if cat not in taxonomy}
@@ -517,27 +532,39 @@ def _print_category_breakdown(
                 _REPORT_TOP_CATEGORIES_COUNT
             )
         )
-        print(f"  {category:<{_REPORT_CATEGORY_WIDTH}} {top_terms}")
+        table.add_row(category, top_terms)
+
+    console.print(table)
 
 
 def _print_top_locations(df: pd.DataFrame) -> None:
     """Print the most frequent locations in scraped results."""
-    print("\nTop locations in results:")
+    table = make_table("Top locations in results", expand=True)
+    table.add_column("Location", style="bold", overflow="fold")
+    table.add_column("Jobs", justify="right")
     for location, count in (
         df["location"].value_counts().head(_REPORT_TOP_LOCATIONS_COUNT).items()
     ):
-        print(f"  {location:<{_REPORT_LOCATION_WIDTH}} {count}")
+        table.add_row(str(location), str(count))
+    console.print(table)
 
 
 def _print_salary_hints(df: pd.DataFrame) -> None:
     """Print postings where a salary hint was extracted."""
     salary_rows = df[df["salary_extracted"].notna()]
-    print(f"\nSalary hints found in {len(salary_rows)}/{len(df)} postings:")
+    table = make_table(
+        f"Salary hints found in {len(salary_rows)}/{len(df)} postings", expand=True
+    )
+    table.add_column("Role / Company", style="bold", overflow="fold")
+    table.add_column("Location", overflow="fold")
+    table.add_column("Salary hint", overflow="fold")
+
     for _, row in salary_rows.head(_REPORT_TOP_SALARY_COUNT).iterrows():
         label = row["job_title"] or row.get("company") or "N/A"
         location = row.get("search_location") or row.get("location") or ""
-        loc_hint = f" [{location}]" if location else ""
-        print(f"  {label:<40}{loc_hint:<25} {row['salary_extracted']}")
+        table.add_row(str(label), str(location), str(row["salary_extracted"]))
+
+    console.print(table)
 
 
 def _known_skill_terms(skills: dict[str, list[tuple[str, str]]]) -> set[str]:
@@ -594,26 +621,37 @@ def _print_missing_skill_terms(
     if not skills_missing:
         return
 
-    print(
-        f"\nLLM terms not covered by current skills/aliases "
-        f"({len(skills_missing)} terms):"
-    )
-    print(
-        f"  Actionable for queue (threshold >= {threshold}, not SKIP_TERMS, not already queued): "
-        f"{len(actionable_missing)} terms"
+    print_panel(
+        "Coverage gap summary",
+        [
+            f"Uncovered terms: {len(skills_missing)}",
+            (
+                "Actionable for queue "
+                f"(threshold >= {threshold}, not SKIP_TERMS, not already queued): "
+                f"{len(actionable_missing)}"
+            ),
+        ],
+        style="yellow",
     )
 
+    table = make_table("Top uncovered terms", expand=True)
+    table.add_column("Term", style="bold")
+    table.add_column("Jobs", justify="right")
     for skill, count in skills_missing.most_common(_REPORT_TOP_MISSING_SKILLS_COUNT):
-        print(f"  {skill:<{_REPORT_SKILL_WIDTH}} {count} jobs")
+        table.add_row(skill, str(count))
+    console.print(table)
 
     if actionable_missing:
-        print("\nTop actionable uncovered terms:")
+        actionable_table = make_table("Top actionable uncovered terms", expand=True)
+        actionable_table.add_column("Term", style="bold")
+        actionable_table.add_column("Jobs", justify="right")
         for skill, count in actionable_missing.most_common(
             _REPORT_TOP_MISSING_SKILLS_COUNT
         ):
-            print(f"  {skill:<{_REPORT_SKILL_WIDTH}} {count} jobs")
+            actionable_table.add_row(skill, str(count))
+        console.print(actionable_table)
 
-    print("  Note: raw uncovered count is broader than pending queue by design.")
+    print_info("Raw uncovered count is broader than pending queue by design.")
 
 
 def _print_llm_section(
@@ -626,9 +664,7 @@ def _print_llm_section(
     if "skills_llm" not in df.columns or not df["skills_llm"].apply(bool).any():
         return
 
-    print(f"\n{'=' * 60}")
-    print("SKILLS COVERAGE GAPS (LLM-discovered)")
-    print(f"{'=' * 60}")
+    print_section("Skills Coverage Gaps (LLM-discovered)")
 
     skills_llm_list: list[dict] = df["skills_llm"].tolist()
 
@@ -655,13 +691,23 @@ def _print_quality_summary(df: pd.DataFrame) -> None:
     no_desc = (~df["has_description"]).sum() if "has_description" in df.columns else 0
     no_skills = (df["all_skills_flat"].apply(len) == 0).sum()
     if total == 0:
-        print("\nExtraction quality (0 jobs):")
-        print("  Empty description  :    0 (0.0%)")
-        print("  Zero skills found  :    0 (0.0%)")
+        table = make_table("Extraction quality")
+        table.add_column("Metric", style="bold")
+        table.add_column("Value", justify="right")
+        table.add_row("Empty description", "0 (0.0%)")
+        table.add_row("Zero skills found", "0 (0.0%)")
+        console.print(table)
         return
-    print(f"\nExtraction quality ({total} jobs):")
-    print(f"  Empty description  : {no_desc:>4} ({no_desc / total * 100:.1f}%)")
-    print(f"  Zero skills found  : {no_skills:>4} ({no_skills / total * 100:.1f}%)")
+
+    table = make_table(f"Extraction quality ({total} jobs)")
+    table.add_column("Metric", style="bold")
+    table.add_column("Count", justify="right")
+    table.add_column("Percent", justify="right")
+    table.add_row("Empty description", str(no_desc), f"{no_desc / total * 100:.1f}%")
+    table.add_row(
+        "Zero skills found", str(no_skills), f"{no_skills / total * 100:.1f}%"
+    )
+    console.print(table)
 
 
 def _print_skills_by_location(df: pd.DataFrame) -> None:
@@ -676,14 +722,18 @@ def _print_skills_by_location(df: pd.DataFrame) -> None:
         if "all_skills_comprehensive" in df.columns
         else "all_skills_flat"
     )
-    print("\nTop skills by search location:")
+
+    table = make_table("Top skills by search location", expand=True)
+    table.add_column("Search location", style="bold", overflow="fold")
+    table.add_column("Top skills", overflow="fold")
     for loc in sorted(locations):
         subset = df[df["search_location"] == loc]
         counter: Counter = Counter()
         for skills_list in subset[col]:
             counter.update(skills_list)
         top = ", ".join(f"{s}({c})" for s, c in counter.most_common(3))
-        print(f"  {str(loc):<30} {top}")
+        table.add_row(str(loc), top)
+    console.print(table)
 
 
 def print_report(
@@ -693,9 +743,11 @@ def print_report(
     candidate_threshold: int,
 ) -> None:
     """Print a human-readable frequency analysis to stdout."""
-    print(f"\n{'=' * 60}")
-    print(f"SKILLS ANALYSIS — {len(df)} unique job postings")
-    print(f"{'=' * 60}")
+    print_panel(
+        "SKILLS ANALYSIS",
+        [f"{len(df)} unique job postings"],
+        style="cyan",
+    )
 
     _print_quality_summary(df)
     _print_top_skills(df)
@@ -737,7 +789,7 @@ def save_excel(
         )
 
     export_df.to_excel(output_path, index=False)
-    print(f"\nExcel saved → {output_path.resolve()}")
+    print_success(f"Excel saved → {output_path.resolve()}")
 
 
 # ── Entry point helpers ───────────────────────────────────────────────────────
@@ -754,7 +806,7 @@ def resolve_input_paths(args: Namespace, data_dir: Path) -> list[Path] | None:
     if args.all:
         paths = sorted(data_dir.glob("jobs_*.json"))
         if not paths:
-            print("No job files found in data/. Run scrape.py first.")
+            print_info("No job files found in data/. Run scrape.py first.")
             return None
         return paths
 
@@ -765,11 +817,11 @@ def resolve_input_paths(args: Namespace, data_dir: Path) -> list[Path] | None:
 
     all_files = sorted(data_dir.glob("jobs_*.json"))
     if not all_files:
-        print("No job files found. Run scrape.py first.")
+        print_info("No job files found. Run scrape.py first.")
         return None
 
     latest_file = all_files[-1]
-    print(f"Today's file not found, using latest: {latest_file}")
+    print_info(f"Today's file not found, using latest: {latest_file}")
     return [latest_file]
 
 
@@ -779,10 +831,10 @@ def build_llm_client(base_url: str, model: str, api_key: str):
         from openai import OpenAI
 
         client = OpenAI(base_url=base_url, api_key=api_key)
-        print(f"LLM extraction enabled → {model} via 9router")
+        print_info(f"LLM extraction enabled → {model} via 9router")
         return client
     except ImportError:
-        print("openai package not installed. Run: pip install openai")
+        print_info("openai package not installed. Run: pip install openai")
         return None
 
 
@@ -848,13 +900,13 @@ def _load_run_context(
 
     skills = load_skills(conn)
     term_count = sum(len(terms) for terms in skills.values())
-    print(
+    print_info(
         f"Skills loaded: {term_count} terms (+ aliases) across {len(skills)} categories"
     )
 
-    print(f"Loading from: {[str(p) for p in paths]}")
+    print_info(f"Loading from: {[str(p) for p in paths]}")
     jobs = load_jobs(paths)
-    print(f"Loaded {len(jobs)} unique jobs.")
+    print_info(f"Loaded {len(jobs)} unique jobs.")
     if not jobs:
         return None
 
