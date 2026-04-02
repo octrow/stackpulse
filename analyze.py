@@ -77,6 +77,9 @@ from config import (
     LLM_RESPONSE_FORMAT_JSON_OBJECT,
     RETRY_AFTER_BUFFER_SECONDS,
     LLM_CANDIDATE_THRESHOLD,
+    LLM_LOW_SIGNAL_REFERENCE_SUM,
+    LLM_LOW_SIGNAL_WARN_BELOW_SUM,
+    LLM_LOW_SIGNAL_WINDOW_JOBS,
 )
 from analysis_candidates import (
     SKIP_TERMS,
@@ -180,6 +183,44 @@ def _activity_log_only(activity_log: AnalysisActivityLog | None, message: str) -
     """Rich Live lines only — never print (keeps non-verbose CLI runs quiet on cache/API noise)."""
     if activity_log is not None:
         activity_log.push(message)
+
+
+def _llm_stored_skill_row_count(llm_skills: dict[str, list[str]] | None) -> int:
+    """Match ``extract_skills_llm`` / DB storage: one row per term per category key (incl. ``_matched``)."""
+    if not llm_skills:
+        return 0
+    return sum(len(v) for v in llm_skills.values())
+
+
+def _rolling_llm_low_signal_warn(
+    window: deque[int],
+    llm_row_count: int,
+    activity_log: AnalysisActivityLog | None,
+    state: dict[str, bool],
+) -> None:
+    """Warn once per episode when the rolling sum of LLM stored rows falls below threshold.
+
+    ``state`` must be a dict with key ``low_signal_active`` (bool), mutated across jobs.
+    """
+    window.append(llm_row_count)
+    if len(window) < LLM_LOW_SIGNAL_WINDOW_JOBS:
+        return
+    total = sum(window)
+    below = total < LLM_LOW_SIGNAL_WARN_BELOW_SUM
+    if below and not state.get("low_signal_active", False):
+        _activity_log_only(
+            activity_log,
+            "   ⚠ LLM low signal: last "
+            f"{LLM_LOW_SIGNAL_WINDOW_JOBS} jobs → {total} stored skill row(s) combined "
+            f"(<{LLM_LOW_SIGNAL_WARN_BELOW_SUM}; reference ≈{LLM_LOW_SIGNAL_REFERENCE_SUM} "
+            f"for {LLM_LOW_SIGNAL_WINDOW_JOBS} jobs at typical regex richness). "
+            f"Per-job row counts: {list(window)} — "
+            "LLM rows are not comparable to regex hit counts; if the model always returns "
+            "almost nothing, check prompt/model/JSON output.",
+        )
+        state["low_signal_active"] = True
+    elif not below:
+        state["low_signal_active"] = False
 
 
 # ── LLM extraction ────────────────────────────────────────────────────────────
@@ -827,6 +868,8 @@ def analyze(
 
     if use_llm_live_ui:
         activity_log = AnalysisActivityLog(mirror_to_file=activity_log_file)
+        llm_row_window: deque[int] = deque(maxlen=LLM_LOW_SIGNAL_WINDOW_JOBS)
+        llm_low_signal_state: dict[str, bool] = {"low_signal_active": False}
         if activity_log_file:
             _get_activity_rotating_logger().info(
                 "=== session start | %d job(s) | LLM + verbose ===",
@@ -867,15 +910,20 @@ def analyze(
                     activity_log,
                     f"[{idx}/{total}] {title_raw}",
                 )
-                job_rows.append(
-                    _analyze_job_row(
-                        job,
-                        taxonomy,
-                        llm_client,
-                        conn,
-                        llm_prompt,
-                        activity_log,
-                    )
+                row_out = _analyze_job_row(
+                    job,
+                    taxonomy,
+                    llm_client,
+                    conn,
+                    llm_prompt,
+                    activity_log,
+                )
+                job_rows.append(row_out)
+                _rolling_llm_low_signal_warn(
+                    llm_row_window,
+                    _llm_stored_skill_row_count(row_out.get("skills_llm")),
+                    activity_log,
+                    llm_low_signal_state,
                 )
                 progress.advance(task_id)
                 live.update(render_live())
@@ -883,6 +931,8 @@ def analyze(
 
     if use_llm_quiet_file_log:
         activity_log = AnalysisActivityLog(mirror_to_file=True)
+        llm_row_window_q: deque[int] = deque(maxlen=LLM_LOW_SIGNAL_WINDOW_JOBS)
+        llm_low_signal_state_q: dict[str, bool] = {"low_signal_active": False}
         _get_activity_rotating_logger().info(
             "=== session start | %d job(s) | LLM + quiet | file log only ===",
             len(jobs),
@@ -894,15 +944,20 @@ def analyze(
                 activity_log,
                 f"[{idx}/{total}] {title_raw}",
             )
-            job_rows.append(
-                _analyze_job_row(
-                    job,
-                    taxonomy,
-                    llm_client,
-                    conn,
-                    llm_prompt,
-                    activity_log,
-                )
+            row_out = _analyze_job_row(
+                job,
+                taxonomy,
+                llm_client,
+                conn,
+                llm_prompt,
+                activity_log,
+            )
+            job_rows.append(row_out)
+            _rolling_llm_low_signal_warn(
+                llm_row_window_q,
+                _llm_stored_skill_row_count(row_out.get("skills_llm")),
+                activity_log,
+                llm_low_signal_state_q,
             )
         return pd.DataFrame(job_rows)
 

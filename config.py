@@ -132,3 +132,14 @@ RETRY_AFTER_BUFFER_SECONDS = 2
 
 # Minimum job occurrences for a candidate term to be promoted into the skills
 LLM_CANDIDATE_THRESHOLD = 2
+
+# Rolling health check for `--llm` runs: compare stored LLM skill *rows* (sum of list lengths
+# in the normalized JSON) to a rough regex baseline. Regex taxonomy often matches ~8–12 terms
+# per posting; the skills-aware LLM stores far fewer rows (known matches + new discoveries only).
+# If the last N jobs' combined row count falls below WARN_BELOW, emit a one-shot warning per
+# "low" episode (see analyze.py).
+LLM_LOW_SIGNAL_WINDOW_JOBS = 5
+# Reference total rows for WINDOW_JOBS postings at typical regex richness (~9.6 / job).
+LLM_LOW_SIGNAL_REFERENCE_SUM = 48
+# Warn when rolling sum < this (50% of REFERENCE_SUM by default).
+LLM_LOW_SIGNAL_WARN_BELOW_SUM = 24

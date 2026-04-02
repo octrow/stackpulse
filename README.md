@@ -235,6 +235,14 @@ Prints a skill frequency table to stdout and saves `data/jobs_*_analysis.xlsx` w
 against known terms first and only flags genuinely new discoveries. Results are cached in `data/skills.db` — repeat
 runs are instant with no API calls.
 
+**Regex vs LLM “skill counts”:** the activity log line `N skill row(s) to store` counts **LLM JSON terms** written toward
+`llm_results` (matched catalog terms plus `new_terms`), not regex taxonomy hits. A typical posting can show **many** regex
+matches across the catalog (~8–12+) but only **a few** LLM rows — that is normal. To catch pathological under-extraction
+(e.g. the model always returns almost nothing), `analyze.py` tracks a **rolling window of the last 5 jobs**: if the
+combined stored row count is **below `LLM_LOW_SIGNAL_WARN_BELOW_SUM`** (default `24`, half of `LLM_LOW_SIGNAL_REFERENCE_SUM`
+`48`), it logs a **one-shot warning per low episode** in the Live panel and in `data/analysis_activity.log` (the episode
+resets when the rolling sum rises back to the threshold or above).
+
 After each `--llm` run, newly discovered terms (seen in ≥ `LLM_CANDIDATE_THRESHOLD` jobs, default 2) are automatically
 queued in `skill_candidates`. Because the LLM is skills-aware, uncovered terms are genuinely new technologies/tools —
 not synonyms or generic concepts.
@@ -315,6 +323,9 @@ sqlite3 data/skills.db "UPDATE skill_candidates SET status='rejected' WHERE term
 | `LLM_MAX_OUTPUT_TOKENS`           | `1000`                         | LLM completion token cap                               |
 | `LLM_RESPONSE_FORMAT_JSON_OBJECT` | `True`                         | Request JSON-object mode; retries once without it if the proxy rejects the parameter |
 | `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` | `30`                           | Max retry sleep for 429 before fallback                |
+| `LLM_LOW_SIGNAL_WINDOW_JOBS`      | `5`                            | Rolling window size for LLM stored-row health check    |
+| `LLM_LOW_SIGNAL_REFERENCE_SUM`    | `48`                           | Reference total LLM rows for that window (~regex baseline) |
+| `LLM_LOW_SIGNAL_WARN_BELOW_SUM`    | `24`                           | Warn when rolling sum is below this (50% of reference by default) |
 | `RETRY_AFTER_BUFFER_SECONDS`      | `2`                            | Safety buffer added to parsed retry-after              |
 | `LLM_CANDIDATE_THRESHOLD`         | `2`                            | Min job occurrences to promote a candidate term        |
 
