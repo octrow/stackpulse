@@ -18,6 +18,7 @@ from ui_rich import (
     print_section,
     print_success,
     print_warning,
+    set_display_mode,
 )
 
 T = TypeVar("T")
@@ -420,6 +421,12 @@ def analyze(
         "--location-contains",
         help="Only analyze jobs whose location contains this string (case-insensitive)",
     ),
+    view: str = typer.Option(
+        "detailed",
+        "--view",
+        help="Output density mode: detailed or compact",
+        case_sensitive=False,
+    ),
 ) -> None:
     """Analyze scraped jobs and export Excel output."""
     if file and all_files:
@@ -428,6 +435,8 @@ def analyze(
 
     try:
         import analyze as analyzer
+
+        set_display_mode(view.lower())
 
         data_dir = Path(analyzer.OUTPUT_DIR)
         conn = analyzer.open_db(data_dir)

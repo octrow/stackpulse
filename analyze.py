@@ -36,7 +36,9 @@ import pandas as pd
 
 from ui_rich import (
     console,
+    is_compact,
     make_table,
+    metric_title,
     percent_bar,
     print_info,
     print_panel,
@@ -487,15 +489,17 @@ def _print_top_skills(df: pd.DataFrame) -> None:
         else "regex taxonomy"
     )
 
-    table = make_table(f"Top {_REPORT_TOP_SKILLS_COUNT} skills [{label}]", expand=True)
-    table.add_column("Skill", style="bold")
-    table.add_column("Jobs", justify="right")
-    table.add_column("Prevalence", justify="right")
-    table.add_column("Signal")
+    table = make_table(metric_title(f"Top {_REPORT_TOP_SKILLS_COUNT} skills [{label}]"))
+    table.add_column("Skill", style="bold", no_wrap=is_compact(), max_width=26)
+    table.add_column("Jobs", justify="right", width=6)
+    table.add_column("%", justify="right", width=6)
+    table.add_column("Signal", width=12)
 
     for skill, count in all_skills.most_common(_REPORT_TOP_SKILLS_COUNT):
         percentage = count / len(df) * 100
-        table.add_row(skill, str(count), f"{percentage:.1f}%", percent_bar(percentage))
+        table.add_row(
+            skill, str(count), f"{percentage:.1f}", percent_bar(percentage, width=12)
+        )
 
     console.print(table)
 
@@ -508,9 +512,9 @@ def _print_category_breakdown(
     col = "skills_by_category" if "skills_by_category" in df.columns else "skills_raw"
     skills_list: list[dict] = df[col].tolist()
 
-    table = make_table("By category", expand=True)
-    table.add_column("Category", style="bold", overflow="fold")
-    table.add_column("Top terms", overflow="fold")
+    table = make_table(metric_title("By category"))
+    table.add_column("Category", style="bold", no_wrap=is_compact(), max_width=24)
+    table.add_column("Top terms", overflow="fold", max_width=74)
 
     # Collect all categories present across jobs (taxonomy order first, then extras)
     all_categories: list[str] = list(taxonomy.keys())
@@ -526,11 +530,10 @@ def _print_category_breakdown(
             continue
 
         total_jobs = len(df)
+        top_n = 4 if is_compact() else _REPORT_TOP_CATEGORIES_COUNT
         top_terms = ", ".join(
             f"{term}({count}, {count / total_jobs * 100:.0f}%)"
-            for term, count in category_counter.most_common(
-                _REPORT_TOP_CATEGORIES_COUNT
-            )
+            for term, count in category_counter.most_common(top_n)
         )
         table.add_row(category, top_terms)
 
@@ -539,12 +542,11 @@ def _print_category_breakdown(
 
 def _print_top_locations(df: pd.DataFrame) -> None:
     """Print the most frequent locations in scraped results."""
-    table = make_table("Top locations in results", expand=True)
-    table.add_column("Location", style="bold", overflow="fold")
-    table.add_column("Jobs", justify="right")
-    for location, count in (
-        df["location"].value_counts().head(_REPORT_TOP_LOCATIONS_COUNT).items()
-    ):
+    table = make_table(metric_title("Top locations in results"))
+    table.add_column("Location", style="bold", overflow="fold", max_width=34)
+    table.add_column("Jobs", justify="right", width=6)
+    top_n = 8 if is_compact() else _REPORT_TOP_LOCATIONS_COUNT
+    for location, count in df["location"].value_counts().head(top_n).items():
         table.add_row(str(location), str(count))
     console.print(table)
 
@@ -553,13 +555,14 @@ def _print_salary_hints(df: pd.DataFrame) -> None:
     """Print postings where a salary hint was extracted."""
     salary_rows = df[df["salary_extracted"].notna()]
     table = make_table(
-        f"Salary hints found in {len(salary_rows)}/{len(df)} postings", expand=True
+        metric_title(f"Salary hints {len(salary_rows)}/{len(df)} postings")
     )
-    table.add_column("Role / Company", style="bold", overflow="fold")
-    table.add_column("Location", overflow="fold")
-    table.add_column("Salary hint", overflow="fold")
+    table.add_column("Role / Company", style="bold", overflow="fold", max_width=30)
+    table.add_column("Loc", overflow="fold", max_width=18)
+    table.add_column("Salary", overflow="fold", max_width=26)
 
-    for _, row in salary_rows.head(_REPORT_TOP_SALARY_COUNT).iterrows():
+    top_n = 8 if is_compact() else _REPORT_TOP_SALARY_COUNT
+    for _, row in salary_rows.head(top_n).iterrows():
         label = row["job_title"] or row.get("company") or "N/A"
         location = row.get("search_location") or row.get("location") or ""
         table.add_row(str(label), str(location), str(row["salary_extracted"]))
@@ -634,20 +637,19 @@ def _print_missing_skill_terms(
         style="yellow",
     )
 
-    table = make_table("Top uncovered terms", expand=True)
-    table.add_column("Term", style="bold")
-    table.add_column("Jobs", justify="right")
-    for skill, count in skills_missing.most_common(_REPORT_TOP_MISSING_SKILLS_COUNT):
+    table = make_table(metric_title("Top uncovered terms"))
+    table.add_column("Term", style="bold", max_width=28)
+    table.add_column("Jobs", justify="right", width=6)
+    top_n = 12 if is_compact() else _REPORT_TOP_MISSING_SKILLS_COUNT
+    for skill, count in skills_missing.most_common(top_n):
         table.add_row(skill, str(count))
     console.print(table)
 
     if actionable_missing:
-        actionable_table = make_table("Top actionable uncovered terms", expand=True)
-        actionable_table.add_column("Term", style="bold")
-        actionable_table.add_column("Jobs", justify="right")
-        for skill, count in actionable_missing.most_common(
-            _REPORT_TOP_MISSING_SKILLS_COUNT
-        ):
+        actionable_table = make_table(metric_title("Top actionable uncovered"))
+        actionable_table.add_column("Term", style="bold", max_width=28)
+        actionable_table.add_column("Jobs", justify="right", width=6)
+        for skill, count in actionable_missing.most_common(top_n):
             actionable_table.add_row(skill, str(count))
         console.print(actionable_table)
 
@@ -664,7 +666,7 @@ def _print_llm_section(
     if "skills_llm" not in df.columns or not df["skills_llm"].apply(bool).any():
         return
 
-    print_section("Skills Coverage Gaps (LLM-discovered)")
+    print_section(metric_title("Skills Coverage Gaps (LLM-discovered)"))
 
     skills_llm_list: list[dict] = df["skills_llm"].tolist()
 
@@ -691,22 +693,20 @@ def _print_quality_summary(df: pd.DataFrame) -> None:
     no_desc = (~df["has_description"]).sum() if "has_description" in df.columns else 0
     no_skills = (df["all_skills_flat"].apply(len) == 0).sum()
     if total == 0:
-        table = make_table("Extraction quality")
-        table.add_column("Metric", style="bold")
-        table.add_column("Value", justify="right")
+        table = make_table(metric_title("Extraction quality"))
+        table.add_column("Metric", style="bold", max_width=24)
+        table.add_column("Value", justify="right", width=12)
         table.add_row("Empty description", "0 (0.0%)")
         table.add_row("Zero skills found", "0 (0.0%)")
         console.print(table)
         return
 
-    table = make_table(f"Extraction quality ({total} jobs)")
-    table.add_column("Metric", style="bold")
-    table.add_column("Count", justify="right")
-    table.add_column("Percent", justify="right")
-    table.add_row("Empty description", str(no_desc), f"{no_desc / total * 100:.1f}%")
-    table.add_row(
-        "Zero skills found", str(no_skills), f"{no_skills / total * 100:.1f}%"
-    )
+    table = make_table(metric_title(f"Extraction quality ({total} jobs)"))
+    table.add_column("Metric", style="bold", max_width=24)
+    table.add_column("Count", justify="right", width=6)
+    table.add_column("%", justify="right", width=6)
+    table.add_row("Empty description", str(no_desc), f"{no_desc / total * 100:.1f}")
+    table.add_row("Zero skills found", str(no_skills), f"{no_skills / total * 100:.1f}")
     console.print(table)
 
 
@@ -723,9 +723,9 @@ def _print_skills_by_location(df: pd.DataFrame) -> None:
         else "all_skills_flat"
     )
 
-    table = make_table("Top skills by search location", expand=True)
-    table.add_column("Search location", style="bold", overflow="fold")
-    table.add_column("Top skills", overflow="fold")
+    table = make_table(metric_title("Top skills by search location"))
+    table.add_column("Location", style="bold", overflow="fold", max_width=24)
+    table.add_column("Top skills", overflow="fold", max_width=70)
     for loc in sorted(locations):
         subset = df[df["search_location"] == loc]
         counter: Counter = Counter()
@@ -743,10 +743,11 @@ def print_report(
     candidate_threshold: int,
 ) -> None:
     """Print a human-readable frequency analysis to stdout."""
+    details = "Detailed" if not is_compact() else "Compact"
     print_panel(
-        "SKILLS ANALYSIS",
-        [f"{len(df)} unique job postings"],
-        style="cyan",
+        "◆ SKILLS ANALYSIS",
+        [f"{len(df)} unique job postings", f"View mode: {details}"],
+        style="bright_magenta",
     )
 
     _print_quality_summary(df)

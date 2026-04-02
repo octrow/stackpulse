@@ -6,7 +6,9 @@ from config import LLM_CANDIDATE_THRESHOLD
 from analysis_db import normalize_term
 from ui_rich import (
     console,
+    is_compact,
     make_table,
+    metric_title,
     print_info,
     print_panel,
     print_success,
@@ -160,10 +162,10 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
         style="cyan",
     )
 
-    table = make_table("Candidates to promote", expand=True)
-    table.add_column("Term", style="bold")
-    table.add_column("Category", overflow="fold")
-    table.add_column("Jobs", justify="right")
+    table = make_table(metric_title("Candidates to promote"))
+    table.add_column("Term", style="bold", no_wrap=is_compact(), max_width=24)
+    table.add_column("Category", overflow="fold", max_width=28)
+    table.add_column("Jobs", justify="right", width=6)
 
     today = date.today().isoformat()
     for row in candidate_rows:
