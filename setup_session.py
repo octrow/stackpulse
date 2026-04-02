@@ -6,6 +6,10 @@ Usage:
     python setup_session.py
 """
 
+import patchright_shim
+
+patchright_shim.install()
+
 import asyncio
 import os
 
@@ -22,7 +26,7 @@ LINKEDIN_PASSWORD = os.getenv("LINKEDIN_PASSWORD")
 
 async def main() -> None:
     """Log in to LinkedIn and persist the browser session."""
-    # Import here so missing playwright doesn't break the import at module level
+    # Import here so missing browser deps don't break the import at module level
     from linkedin_scraper import BrowserManager
 
     print("Starting browser (non-headless so you can log in)...")

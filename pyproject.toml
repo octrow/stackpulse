@@ -10,13 +10,16 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "linkedin-scraper>=3.1.1",
-    "playwright",
+    "patchright",
     "python-dotenv",
     "pandas",
     "openpyxl",
     "openai",
     "typer",
     "rich",
+    "beautifulsoup4",
+    "lxml",
+    "requests",
 ]
 
 [project.scripts]
@@ -28,9 +31,13 @@ py-modules = [
     "config",
     "setup_session",
     "scrape",
+    "scrape_fast",
     "job_scraper_direct",
+    "job_search_browser",
+    "patchright_shim",
     "analyze",
     "analysis_db",
     "analysis_candidates",
     "analysis_llm_cache",
+    "ui_rich",
 ]

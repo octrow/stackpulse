@@ -1,8 +1,12 @@
 """
-Direct Playwright scraper for LinkedIn job pages.
+Direct browser scraper for LinkedIn job pages (Patchright / Playwright-compatible API).
 Replaces the broken linkedin_scraper.JobScraper which never waits
 for the React SPA to render content (it only waits for domcontentloaded).
 """
+
+import patchright_shim
+
+patchright_shim.install()
 
 import asyncio
 import logging

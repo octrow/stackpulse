@@ -3,8 +3,8 @@
 Collects job postings across Europe, saves them as JSON, and analyzes the skill landscape to answer: _"what do employers
 actually want in 2026?"_
 
-Currently scrapes LinkedIn via Playwright, using a custom job-page scraper that fixes the library's broken content
-extraction. Built to be source-agnostic — LinkedIn is just the first feed.
+Default path uses a **fast HTTP** guest scraper (`scrape_fast.py`). Optional **browser** mode uses [Patchright](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright) (`patchright_shim.py`) plus a custom job-page scraper that fixes the library's broken content
+extraction — use it when you need fields like **`applicant_count`**. Built to be source-agnostic — LinkedIn is just the first feed.
 
 ---
 
@@ -16,7 +16,8 @@ stackpulse/
 ├── cli.py                  # Typer + Rich CLI (stackpulse command)
 ├── setup_session.py        # one-time LinkedIn login → session file
 ├── scrape.py               # main scraper orchestrator + per-query/per-job helpers
-├── job_scraper_direct.py   # custom Playwright scraper (replaces broken library JobScraper)
+├── patchright_shim.py      # map playwright.async_api → patchright (linkedin-scraper compatibility)
+├── job_scraper_direct.py   # custom browser scraper (replaces broken library JobScraper)
 ├── analyze.py              # analysis orchestration/reporting + LLM extraction pipeline
 ├── analysis_db.py          # DB schema/migrations + shared canonical_linkedin_job_key helper
 ├── analysis_candidates.py  # candidate queue and promotion workflows
@@ -55,12 +56,20 @@ What this does:
 - launcher follows symlinks to resolve the real repo path
 - launcher auto-creates `.venv` on first run
 - launcher auto-installs dependencies when missing
-- launcher auto-installs Playwright Chromium when missing
+- launcher auto-installs Patchright Chromium when missing
 
 Optional packaging-based install (alternative):
 
 ```bash
 pip install -e .
+```
+
+**Patchright has no `patchright` shell command.** Install the Chromium build with the same Python that has the dependencies (e.g. your venv):
+
+```bash
+python3 -m patchright install chromium
+# or, from this repo after ./stackpulse created .venv:
+.venv/bin/python -m patchright install chromium
 ```
 
 If `stackpulse` is still not found, add this to your shell profile (`~/.bashrc` or `~/.zshrc`):
@@ -84,9 +93,10 @@ StackPulse — what would you like to do?
   2  scrape         Scrape LinkedIn for new jobs
   3  auto           Bootstrap + scrape + analyze end-to-end
   4  setup-session  Create or refresh LinkedIn session
-  5  quit
+  5  review-skills  Accept or reject LLM skill candidates (queue)
+  6  quit
 
-Choice [1-5]:
+Choice [1-6]:
 ```
 
 All subcommands still work non-interactively via flags:
@@ -98,6 +108,7 @@ stackpulse scrape --limit 3
 stackpulse analyze --all --llm
 stackpulse analyze --all --title-contains "Backend" --location-contains "Berlin"
 stackpulse analyze --candidates
+stackpulse review-skills
 ```
 
 ### Auto workflow (one command)
@@ -112,7 +123,7 @@ stackpulse auto --llm --promote 2
 
 - Creates virtualenv if missing (`.venv` by default)
 - Installs dependencies only when missing
-- Installs Playwright Chromium only when missing
+- Installs Patchright Chromium only when missing
 - Skips session setup if `session.json` already exists
 - Fails fast on the first failed step and prints a Rich summary table
 
@@ -153,15 +164,25 @@ py scrape.py              # full run — all queries in config.py
 py scrape.py --limit 3    # quick test, 3 jobs per query
 py scrape.py --fresh      # ignore all previous results, re-scrape everything
 
-# Typer CLI equivalents
+# Typer CLI equivalents (default mode is fast HTTP — no browser)
 stackpulse scrape
 stackpulse scrape --limit 3
 stackpulse scrape --fresh
+stackpulse scrape --mode browser   # optional: Patchright + session.json (e.g. applicant_count)
+
+# Legacy scripts: scrape.py = browser only; scrape_fast.py = HTTP only
+py scrape_fast.py --limit 3
 ```
+
+**Scrape modes:** `stackpulse scrape` defaults to **`--mode fast`** (guest HTTP, fastest, no `session.json`). Use **`--mode browser`** when you need logged-in fields such as **`applicant_count`**. The interactive wizard asks `[fast/browser]` with **fast** as the default.
 
 **Resume is automatic** — on every run the scraper loads previously scraped job keys from `data/skills.db`
 (table `scraped_jobs`) and skips them. Existing historical `data/jobs_*.json` files are backfilled once into the DB
 when the ledger is empty. No flag needed.
+
+**Query-level resume** — if you stop mid-run (Ctrl+C), the next scrape continues from the same **search query index**
+(order of `SEARCH_QUERIES` in `config.py`), not from the beginning: fast mode writes `data/scrape_resume_fast.json`,
+browser mode writes `data/scrape_resume_browser.json`. Delete that file (or use `--fresh`) to start again from query 1.
 
 **Ctrl+C exits cleanly** — progress is saved after every job. Re-run at any time to pick up where you left off.
 
@@ -241,6 +262,9 @@ stackpulse analyze --promote 3
 stackpulse analyze --all --promote 2
 ```
 
+**Interactive review (Rich + prompts):** after `--llm` runs have filled the queue, use `stackpulse review-skills` (or
+wizard option **5**) to approve or reject each pending term, or bulk-promote by minimum job count — no SQL required.
+
 Once promoted, terms are matched by regex in all future runs — **no `--llm` flag needed**.
 
 To reject a term so it never reappears:
@@ -269,7 +293,7 @@ sqlite3 data/skills.db "UPDATE skill_candidates SET status='rejected' WHERE term
 | Variable                     | Default | Description                                                 |
 |------------------------------|---------|-------------------------------------------------------------|
 | `PAGE_LOAD_TIMEOUT_MS`       | `60000` | Timeout for `page.goto(..., wait_until="domcontentloaded")` |
-| `H1_WAIT_TIMEOUT_MS`         | `15000` | Timeout waiting for job title `<h1>`                        |
+| `H1_WAIT_TIMEOUT_MS`         | `5000` | Timeout waiting for job title `<h1>`                        |
 | `BUTTON_CLICK_TIMEOUT_MS`    | `3000`  | Timeout for clicking expand buttons                         |
 | `POST_CLICK_SETTLE_SECONDS`  | `0.5`   | Sleep after each expand click                               |
 | `POST_EXPAND_SETTLE_SECONDS` | `1.0`   | Sleep before extraction starts                              |
@@ -282,11 +306,12 @@ sqlite3 data/skills.db "UPDATE skill_candidates SET status='rejected' WHERE term
 |-----------------------------------|--------------------------------|--------------------------------------------------------|
 | `DB_FILENAME`                     | "skills.db"                    | SQLite filename inside `OUTPUT_DIR`                    |
 | `NINEROUTER_BASE_URL`             | "http://localhost:20128/v1"    | OpenAI-compatible 9router endpoint                     |
-| `NINEROUTER_MODEL`                | "groq/llama-3.3-70b-versatile" | Primary extraction model                               |
-| `NINEROUTER_FALLBACK_MODEL`       | "9router-combo"                | Fallback model/combo when primary is quota-limited     |
+| `NINEROUTER_MODEL`                | "9router-combo"                | Primary model (use a concrete provider only if wired in 9router) |
+| `NINEROUTER_FALLBACK_MODEL`       | ""                             | Optional fallback when primary fails (e.g. after 429)              |
 | `NINEROUTER_API_KEY`              | "local"                        | API key passed to the OpenAI-compatible 9router client |
 | `LLM_MAX_INPUT_CHARS`             | `8000`                         | Max characters sent from each posting to LLM           |
 | `LLM_MAX_OUTPUT_TOKENS`           | `1000`                         | LLM completion token cap                               |
+| `LLM_RESPONSE_FORMAT_JSON_OBJECT` | `True`                         | Request JSON-object mode; retries once without it if the proxy rejects the parameter |
 | `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` | `30`                           | Max retry sleep for 429 before fallback                |
 | `RETRY_AFTER_BUFFER_SECONDS`      | `2`                            | Safety buffer added to parsed retry-after              |
 | `LLM_CANDIDATE_THRESHOLD`         | `2`                            | Min job occurrences to promote a candidate term        |
@@ -304,7 +329,7 @@ JOBS_PER_QUERY = 3
 DELAY_BETWEEN_JOBS = 1
 DELAY_BETWEEN_QUERIES = 2
 PAGE_LOAD_TIMEOUT_MS = 45_000
-H1_WAIT_TIMEOUT_MS = 12_000
+H1_WAIT_TIMEOUT_MS = 5_000
 LLM_RATE_LIMIT_MAX_WAIT_SECONDS = 15
 ```
 
@@ -316,7 +341,7 @@ DELAY_BETWEEN_QUERIES = 5
 PAGE_LOAD_TIMEOUT_MS = 60_000
 H1_WAIT_TIMEOUT_MS = 15_000
 LLM_RATE_LIMIT_MAX_WAIT_SECONDS = 30
-NINEROUTER_FALLBACK_MODEL = "9router-combo"
+# Optional second route if primary exhausts: NINEROUTER_FALLBACK_MODEL = "groq/llama-3.3-70b-versatile"
 ```
 
 Tip: use the fast profile for selector/debug iteration, then switch back to the stable profile for production collection
@@ -410,6 +435,11 @@ sqlite3 data/skills.db "SELECT sc.term, c.name AS category, sc.jobs_count, sc.st
 - **LinkedIn UI drift:** CSS selectors can break due to A/B tests. If fields become `null`, inspect `data/debug/`
   snapshots and update selector lists.
 - **LLM quota limits:** long quota windows skip sleep-retry and use fallback model if configured.
+- **LLM invalid JSON:** some models occasionally emit prose inside JSON arrays; the prompt forbids that, `response_format`
+  JSON mode is requested when supported, and the analyzer retries once with a stricter instruction. If logs still show
+  `LLM output was not valid JSON`, set `NINEROUTER_FALLBACK_MODEL` or set `LLM_RESPONSE_FORMAT_JSON_OBJECT = False` if
+  your OpenAI-compatible proxy errors on that parameter (the client also retries without JSON mode when the error looks
+  like an unsupported parameter).
 - **Single-letter language matching:** `c` is matched as `\bc\b` which can false-positive on the English word.
   LLM extraction correctly disambiguates C language from prose.
 - **Best-effort extraction paths:** scraper field extractors fail soft by design and continue fallback traversal; debug

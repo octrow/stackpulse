@@ -34,3 +34,6 @@ Thumbs.db
 # Playwright
 playwright-report/
 test-results/
+
+# Local research clones (optional)
+research/

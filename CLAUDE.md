@@ -17,13 +17,21 @@ stackpulse --help
 stackpulse setup-session
 stackpulse scrape --limit 3
 stackpulse scrape --fresh
+stackpulse scrape --mode browser --limit 5   # optional: Patchright + session (e.g. applicant_count)
+# Default --mode is fast (HTTP guest); use browser when you need logged-in fields
+stackpulse auto --all                      # default --scrape-mode fast; skips Chromium/session when fast
+stackpulse auto --scrape-mode browser --all # optional browser scrape + needs session.json / Patchright
 stackpulse analyze --all --llm
 stackpulse analyze --all --title-contains "Backend" --location-contains "Berlin"
 stackpulse analyze --candidates
+stackpulse analyze --all --no-verbose   # minimal UI: spinner only (no step lines / per-job bar)
 stackpulse auto --limit 3 --all
 
 # Troubleshooting PATH (if stackpulse not found)
 export PATH="$HOME/.local/bin:$PATH"
+
+# Patchright: there is no `patchright` CLI on PATH — use the venv’s Python:
+#   .venv/bin/python -m patchright install chromium
 ```
 
 # One-time login (legacy script entrypoint still supported)
@@ -35,6 +43,7 @@ py setup_session.py
 py scrape.py --limit 3 # test run
 py scrape.py # full run (all queries in config.py)
 py scrape.py --fresh # ignore all previous results
+py scrape_fast.py --limit 3 # fast HTTP guest scraper (no browser session)
 
 # Analyze collected data (legacy script entrypoints)
 
@@ -42,6 +51,8 @@ py analyze.py # today's file
 py analyze.py --all # merge all data/jobs_*.json files
 py analyze.py --llm # + LLM extraction via 9router, results cached in skills.db
 py analyze.py --all --llm
+py analyze.py --quiet                   # minimal progress (no per-job bar; matches CLI --no-verbose)
+py analyze.py --no-activity-log-file      # do not append LLM/pipeline lines to data/analysis_activity.log (5 MiB rotation)
 
 # LLM → skill promotion pipeline
 
@@ -56,8 +67,8 @@ py analyze.py --all --promote # promote first, then analyze with enriched skills
 
 - creates `.venv` if missing
 - installs dependencies only when missing
-- installs Playwright Chromium only when missing
-- skips session setup if `session.json` exists
+- installs Patchright Chromium only when missing (Patchright replaces Playwright; see `patchright_shim.py`)
+- skips session setup if `session.json` exists (also skipped when `--scrape-mode fast`, the default)
 - fails fast on first failed step
 
 Legacy script commands remain valid and are used by the CLI internally.
@@ -68,10 +79,11 @@ Legacy script commands remain valid and are used by the CLI internally.
 
 - no-args invocation → `_interactive_wizard()` (prompts for command + options, then calls the function directly)
 - `setup-session` → `setup_session.main()`
-- `scrape` → `scrape.scrape_all()`
+- `scrape` → `scrape_fast.scrape_all_fast()` when `--mode fast` (default), or `scrape.scrape_all()` when `--mode browser` (Patchright + session; e.g. `applicant_count`)
 - `analyze` → early-exit branches (candidates, promote-only, no-paths) in the command function; core pipeline delegated
   to `_run_analysis_pipeline()`; cohort filters (`--title-contains`, `--location-contains`) applied inside that helper
-  after `load_jobs()`
+  after `load_jobs()`. Default `--verbose` prints step messages and a Rich per-job progress bar; `--no-verbose` uses a
+  single status spinner. Legacy `analyze.py --quiet` aligns with `--no-verbose`.
 - `auto` → orchestrates venv/bootstrap/session/scrape/analyze sequence
 
 `analyze` DB connection is owned by the command function and closed in a `try/finally` — the pipeline helper never
@@ -90,8 +102,9 @@ Prefer reusing script-level functions and keep behavior parity with existing ent
 
 The library (`linkedin_scraper`) provides two working pieces and one broken piece:
 
-- **`BrowserManager`** — Playwright browser wrapper with session save/load. Used as an async context manager.
-- **`JobSearchScraper`** — searches LinkedIn and returns a list of job URLs. Works correctly.
+- **`BrowserManager`** — Browser wrapper (Patchright driver via `patchright_shim`: `playwright.async_api` → `patchright.async_api`) with session save/load. Used as an async context manager.
+- **`JobSearchScraper`** (library) — not used for URL discovery: it only scrolls the window a few times; LinkedIn’s
+  results list does not expand the document body, so you only get a handful of links. **`job_search_browser.search_job_urls_paginated`** drives the same `start=` pagination as the website (e.g. 25 jobs per page) until `JOBS_PER_QUERY` URLs are collected.
 - **`JobScraper`** (library) — **broken**: only waits for `domcontentloaded`, so it reads an empty DOM before React
   renders. All fields return `null`. Do not use it.
 
@@ -99,11 +112,18 @@ The library (`linkedin_scraper`) provides two working pieces and one broken piec
 appear, clicks description expand buttons, and extracts fields via ordered selector fallback lists. When `<h1>` never
 appears, it dumps a screenshot and HTML snippet to `OUTPUT_DIR/debug/<job_id>.*`.
 
-`scrape.py` is now intentionally split into small orchestration helpers (`_search_query_urls`, `_scrape_query_urls`,
-`_log_run_summary`, etc.) plus `QueryScrapeContext` for per-query scrape state, to keep `scrape_all()` readable while
-preserving auto-resume and save-after-each-job semantics. Dedupe uses shared
-`analysis_db.canonical_linkedin_job_key()` (LinkedIn job ID when available, otherwise normalized URL path) and
-persists successful scrapes into `scraped_jobs`.
+`scrape.py` is intentionally split into small orchestration helpers (`_search_query_urls`, `_scrape_query_urls`,
+`log_run_summary`, etc.) plus `QueryScrapeContext` for per-query scrape state, to keep `scrape_all()` readable while
+preserving auto-resume and save-after-each-job semantics. Shared helpers (`open_scrape_db`, `initialise_scrape_state`,
+`enrich_scraped_job`, `log_run_summary`) are public so `scrape_fast.py` can reuse the same JSON + DB dedupe path.
+
+**`scrape_fast.py`** (CLI default `--mode fast`): hits LinkedIn guest job search HTML and `/jobs/view/{id}` over HTTP
+(no browser, no `session.json`). Faster but more aggressive IP rate limits; some detail pages redirect to signup
+(leaving `job_description` empty); `applicant_count` is typically empty. Same output schema and `scraped_jobs` ledger
+as the browser path. Use **`--mode browser`** + `scrape.py` when you need **`applicant_count`** (logged-in DOM).
+
+Dedupe uses shared `analysis_db.canonical_linkedin_job_key()` (LinkedIn job ID when available, otherwise normalized URL
+path) and persists successful scrapes into `scraped_jobs`.
 
 `analyze.py` entrypoint flow is split into `_build_parser()`, `_handle_mode_only_paths()`, and `_load_run_context()`.
 `main()` now orchestrates these helpers, then runs analyze/report/export.
@@ -116,8 +136,8 @@ before falling back to manual login.
 ```
 
 config.py (queries + timeouts + paths + LLM settings)
-→ scrape.py loops over queries, calls JobSearchScraper → list of URLs
-→ job_scraper_direct.py scrapes each URL → dict
+→ (default) scrape_fast.py: guest search + job detail HTTP → dict
+OR (--mode browser) scrape.py: `job_search_browser.search_job_urls_paginated` → URLs → job_scraper_direct per URL → dict
 → data/jobs_YYYY-MM-DD.json incremental save after each job
 → analyze.py loads JSON(s)
 ├─ regex-matches skills from data/skills.db → stdout report + .xlsx
@@ -226,7 +246,7 @@ preserved for backward compatibility.
 includes prevalence % per top term. The LLM section shows only skills coverage gaps (terms not yet in catalog),
 not redundant LLM aggregates.
 
-**Field coverage logging**: `_log_run_summary` logs counts of jobs missing `job_description`, `job_title`, and
+**Field coverage logging**: `log_run_summary` logs counts of jobs missing `job_description`, `job_title`, and
 `location` at end of each scrape run (visible in `data/scraper.log`).
 
 ## Selector debugging

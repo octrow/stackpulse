@@ -1,8 +1,11 @@
 linkedin-scraper>=3.1.1
-playwright
+patchright
 python-dotenv
 pandas
 openpyxl
 openai
 typer
 rich
+beautifulsoup4
+lxml
+requests

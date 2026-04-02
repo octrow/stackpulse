@@ -10,6 +10,10 @@ Usage:
     py scrape.py --fresh          # ignore previous results, re-scrape everything
 """
 
+import patchright_shim
+
+patchright_shim.install()
+
 import asyncio
 import argparse
 import json
@@ -25,8 +29,15 @@ from typing import Any
 
 try:
     from playwright.async_api import Error as PlaywrightError
-except ImportError:  # pragma: no cover - only when playwright is missing
+except ImportError:  # pragma: no cover - only when browser driver is missing
     PlaywrightError = RuntimeError
+
+try:
+    from linkedin_scraper.core.exceptions import LinkedInScraperException
+except ImportError:  # pragma: no cover — scrape exits if linkedin_scraper missing
+
+    class LinkedInScraperException(Exception):
+        """Placeholder when linkedin_scraper is not installed."""
 
 from config import (
     SEARCH_QUERIES,
@@ -34,9 +45,12 @@ from config import (
     DELAY_BETWEEN_JOBS,
     DELAY_BETWEEN_QUERIES,
     OUTPUT_DIR,
+    SCRAPER_RESUME_BROWSER_FILENAME,
+    SCRAPER_RESUME_FAST_FILENAME,
     SESSION_FILE,
 )
 from job_scraper_direct import scrape_job
+from job_search_browser import search_job_urls_paginated
 from analysis_db import (
     canonical_linkedin_job_key,
     init_db,
@@ -68,7 +82,7 @@ def setup_logging() -> logging.Logger:
         ],
     )
     # Silence noisy third-party loggers
-    for noisy_logger_name in ("playwright", "asyncio", "urllib3", "httpx"):
+    for noisy_logger_name in ("playwright", "patchright", "asyncio", "urllib3", "httpx"):
         logging.getLogger(noisy_logger_name).setLevel(logging.WARNING)
 
     return logging.getLogger("scraper")
@@ -81,7 +95,7 @@ log = setup_logging()
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def _open_scrape_db() -> sqlite3.Connection:
+def open_scrape_db() -> sqlite3.Connection:
     """Open and initialize the shared SQLite DB used for scrape dedupe state."""
     conn = open_db(Path(OUTPUT_DIR))
     init_db(conn)
@@ -181,17 +195,17 @@ def extract_salary(text: str | None) -> str | None:
 # ── Main scrape loop ──────────────────────────────────────────────────────────
 
 
-def _load_scraper_dependencies() -> tuple[Any, Any, type[Exception]]:
+def _load_scraper_dependencies() -> tuple[Any, type[Exception]]:
     """Import runtime scraper dependencies or exit with a clear instruction."""
     try:
-        from linkedin_scraper import BrowserManager, JobSearchScraper
+        from linkedin_scraper import BrowserManager
         from linkedin_scraper import AuthenticationError
     except ImportError:
         log.error(
-            "linkedin-scraper not installed. Run: pip install -r requirements.txt && playwright install chromium"
+            "linkedin-scraper not installed. Run: pip install -r requirements.txt && python -m patchright install chromium"
         )
         sys.exit(1)
-    return BrowserManager, JobSearchScraper, AuthenticationError
+    return BrowserManager, AuthenticationError
 
 
 def _ensure_session_file() -> None:
@@ -201,7 +215,7 @@ def _ensure_session_file() -> None:
         sys.exit(1)
 
 
-def _initialise_scrape_state(
+def initialise_scrape_state(
     output_file: Path, fresh: bool, conn: sqlite3.Connection
 ) -> tuple[set[str], list[dict]]:
     """Return seen URL keys and current output rows for fresh/resume mode."""
@@ -222,7 +236,58 @@ def _initialise_scrape_state(
     return seen_keys, all_jobs
 
 
-def _enrich_scraped_job(
+def _scrape_resume_path(data_dir: Path, *, browser: bool) -> Path:
+    name = SCRAPER_RESUME_BROWSER_FILENAME if browser else SCRAPER_RESUME_FAST_FILENAME
+    return data_dir / name
+
+
+def load_scrape_resume_query_index(data_dir: Path, *, browser: bool) -> int:
+    """1-based next query index to run from SEARCH_QUERIES; 1 if missing or invalid."""
+    path = _scrape_resume_path(data_dir, browser=browser)
+    if not path.is_file():
+        return 1
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        n = int(raw["next_query_index"])
+    except (OSError, KeyError, JSONDecodeError, TypeError, ValueError):
+        return 1
+    nq = len(SEARCH_QUERIES)
+    if n < 1 or n > nq:
+        return 1
+    return n
+
+
+def save_scrape_resume_query_index(data_dir: Path, next_query_index: int, *, browser: bool) -> None:
+    """Write next 1-based query index for the following run (caller clamps to valid range)."""
+    path = _scrape_resume_path(data_dir, browser=browser)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    nq = len(SEARCH_QUERIES)
+    payload = {
+        "next_query_index": max(1, min(int(next_query_index), nq + 1)),
+        "saved_at": datetime.now().isoformat(timespec="seconds"),
+        "total_queries": nq,
+    }
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def clear_scrape_resume(data_dir: Path, *, browser: bool) -> None:
+    path = _scrape_resume_path(data_dir, browser=browser)
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def persist_scrape_resume_pointer(data_dir: Path, next_query_index: int, *, browser: bool) -> None:
+    """After finishing query *k*, pass *k+1*; if the run is complete, clears the resume file."""
+    nq = len(SEARCH_QUERIES)
+    if next_query_index > nq:
+        clear_scrape_resume(data_dir, browser=browser)
+    else:
+        save_scrape_resume_query_index(data_dir, next_query_index, browser=browser)
+
+
+def enrich_scraped_job(
     job: dict, keywords: str, location: str, scraped_date: str
 ) -> None:
     """Attach derived and provenance fields to a scraped job record."""
@@ -249,7 +314,7 @@ def _log_scraped_job(job: dict) -> None:
 
 
 async def _search_query_urls(
-    search_scraper: Any,
+    page: Any,
     keywords: str,
     location: str,
     limit_per_query: int,
@@ -257,7 +322,8 @@ async def _search_query_urls(
 ) -> tuple[list[str], bool]:
     """Search one query and return URLs + stop signal for auth expiry."""
     try:
-        job_urls: list[str] = await search_scraper.search(
+        job_urls: list[str] = await search_job_urls_paginated(
+            page,
             keywords=keywords,
             location=location,
             limit=limit_per_query,
@@ -266,6 +332,16 @@ async def _search_query_urls(
     except authentication_error_cls:
         log.error("Session expired — run setup_session.py again.")
         return [], True
+    except LinkedInScraperException as error:
+        log.warning(
+            "Search failed for '%s' in '%s' (%s): %s",
+            keywords,
+            location,
+            type(error).__name__,
+            error,
+        )
+        await asyncio.sleep(DELAY_BETWEEN_QUERIES)
+        return [], False
     except (PlaywrightError, TimeoutError, OSError, ValueError) as error:
         log.warning(
             "Search failed for '%s' in '%s' (%s): %s",
@@ -316,7 +392,7 @@ async def _scrape_query_urls(
             await asyncio.sleep(DELAY_BETWEEN_JOBS)
             continue
 
-        _enrich_scraped_job(
+        enrich_scraped_job(
             job_dict,
             context.keywords,
             context.location,
@@ -343,7 +419,7 @@ async def _scrape_query_urls(
     return jobs_scraped_count, jobs_failed_count, False
 
 
-def _log_run_summary(
+def log_run_summary(
     start_time: datetime,
     jobs_scraped_count: int,
     jobs_failed_count: int,
@@ -372,20 +448,28 @@ def _log_run_summary(
     log.info("Output: %s", output_file.resolve())
 
 
-async def scrape_all(limit_per_query: int, fresh: bool) -> None:
-    """Run the full scrape across all configured queries."""
-    browser_manager_cls, job_search_scraper_cls, authentication_error_cls = (
-        _load_scraper_dependencies()
-    )
+async def scrape_all(limit_per_query: int, fresh: bool) -> bool:
+    """Run the full scrape across all configured queries.
+
+    Returns True if the user interrupted (Ctrl+C), False on normal completion.
+    """
+    browser_manager_cls, authentication_error_cls = _load_scraper_dependencies()
     _ensure_session_file()
 
-    conn = _open_scrape_db()
+    data_dir = Path(OUTPUT_DIR)
+    conn = open_scrape_db()
     try:
         today = date.today().isoformat()
-        output_file = Path(OUTPUT_DIR) / f"jobs_{today}.json"
-        seen_keys, all_jobs = _initialise_scrape_state(output_file, fresh, conn)
+        output_file = data_dir / f"jobs_{today}.json"
+        seen_keys, all_jobs = initialise_scrape_state(output_file, fresh, conn)
 
+        if fresh:
+            clear_scrape_resume(data_dir, browser=True)
+
+        start_q = 1 if fresh else load_scrape_resume_query_index(data_dir, browser=True)
+        queries_slice = SEARCH_QUERIES[start_q - 1 :]
         total_queries = len(SEARCH_QUERIES)
+
         jobs_scraped_count = 0
         jobs_failed_count = 0
         start_time = datetime.now()
@@ -395,15 +479,25 @@ async def scrape_all(limit_per_query: int, fresh: bool) -> None:
             total_queries,
             limit_per_query,
         )
+        if start_q > 1 and not fresh:
+            log.info(
+                "Resume: continuing from query %s/%s (delete %s to start from query 1)",
+                start_q,
+                total_queries,
+                SCRAPER_RESUME_BROWSER_FILENAME,
+            )
 
         _interrupted = False
+        resume_next = start_q
 
         async with browser_manager_cls(headless=True) as browser:
             await browser.load_session(SESSION_FILE)
-            search_scraper = job_search_scraper_cls(browser.page)
 
             try:
-                for query_index, (keywords, location) in enumerate(SEARCH_QUERIES, 1):
+                for query_index, (keywords, location) in enumerate(
+                    queries_slice, start=start_q
+                ):
+                    resume_next = query_index
                     log.info(
                         "[%s/%s] Searching '%s' in '%s'",
                         query_index,
@@ -413,15 +507,22 @@ async def scrape_all(limit_per_query: int, fresh: bool) -> None:
                     )
 
                     job_urls, should_stop = await _search_query_urls(
-                        search_scraper,
+                        browser.page,
                         keywords,
                         location,
                         limit_per_query,
                         authentication_error_cls,
                     )
                     if should_stop:
+                        persist_scrape_resume_pointer(
+                            data_dir, resume_next, browser=True
+                        )
                         break
                     if not job_urls:
+                        resume_next = query_index + 1
+                        persist_scrape_resume_pointer(
+                            data_dir, resume_next, browser=True
+                        )
                         continue
 
                     new_urls = [
@@ -456,10 +557,23 @@ async def scrape_all(limit_per_query: int, fresh: bool) -> None:
                     jobs_scraped_count += query_scraped_count
                     jobs_failed_count += query_failed_count
                     if should_stop:
-                        return
+                        persist_scrape_resume_pointer(
+                            data_dir, resume_next, browser=True
+                        )
+                        log_run_summary(
+                            start_time,
+                            jobs_scraped_count,
+                            jobs_failed_count,
+                            all_jobs,
+                            output_file,
+                        )
+                        return False
 
+                    resume_next = query_index + 1
+                    persist_scrape_resume_pointer(data_dir, resume_next, browser=True)
                     await asyncio.sleep(DELAY_BETWEEN_QUERIES)
             except (KeyboardInterrupt, asyncio.CancelledError):
+                persist_scrape_resume_pointer(data_dir, resume_next, browser=True)
                 log.info(
                     "Scrape interrupted — saving %d jobs collected so far.",
                     len(all_jobs),
@@ -467,12 +581,11 @@ async def scrape_all(limit_per_query: int, fresh: bool) -> None:
                 _interrupted = True
                 # Do not re-raise: lets async with __aexit__ close the browser cleanly
 
-        _log_run_summary(
+        log_run_summary(
             start_time, jobs_scraped_count, jobs_failed_count, all_jobs, output_file
         )
 
-        if _interrupted:
-            raise KeyboardInterrupt
+        return _interrupted
     finally:
         conn.close()
 
@@ -488,9 +601,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    try:
-        asyncio.run(scrape_all(limit_per_query=args.limit, fresh=args.fresh))
-    except KeyboardInterrupt:
+    interrupted = asyncio.run(scrape_all(limit_per_query=args.limit, fresh=args.fresh))
+    if interrupted:
         log.info("Interrupted by user. Exiting cleanly.")
         sys.exit(130)
 

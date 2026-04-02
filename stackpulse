@@ -19,7 +19,7 @@ create_venv() {
 }
 
 ensure_deps() {
-  if ! "$VENV_PY" -c "import linkedin_scraper, playwright, dotenv, pandas, openpyxl, openai, typer, rich" >/dev/null 2>&1; then
+  if ! "$VENV_PY" -c "import linkedin_scraper, patchright, dotenv, pandas, openpyxl, openai, typer, rich, bs4, requests, lxml" >/dev/null 2>&1; then
     echo "[stackpulse] installing dependencies"
     "$VENV_PY" -m pip install -r "$SCRIPT_DIR/requirements.txt"
   fi
@@ -27,8 +27,8 @@ ensure_deps() {
 
 ensure_chromium() {
   if [[ ! -d "$HOME/.cache/ms-playwright" ]] || ! compgen -G "$HOME/.cache/ms-playwright/chromium-*" > /dev/null; then
-    echo "[stackpulse] installing Playwright Chromium"
-    "$VENV_PY" -m playwright install chromium
+    echo "[stackpulse] installing Patchright Chromium"
+    "$VENV_PY" -m patchright install chromium
   fi
 }
 

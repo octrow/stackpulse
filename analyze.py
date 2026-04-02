@@ -25,14 +25,30 @@ To add an alias (e.g. German synonym):
 
 import argparse
 import json
+import logging
 import re
 import sqlite3
 import time
+import unicodedata
+from logging.handlers import RotatingFileHandler
 from argparse import Namespace
-from collections import Counter
+from collections import Counter, deque
 from datetime import date
 from pathlib import Path
 import pandas as pd
+from rich.console import Group
+from rich.live import Live
+from rich.markup import escape
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    track,
+)
 
 from ui_rich import (
     console,
@@ -48,6 +64,9 @@ from ui_rich import (
 
 from config import (
     OUTPUT_DIR,
+    ANALYSIS_ACTIVITY_LOG_BACKUP_COUNT,
+    ANALYSIS_ACTIVITY_LOG_FILENAME,
+    ANALYSIS_ACTIVITY_LOG_MAX_BYTES,
     NINEROUTER_BASE_URL,
     NINEROUTER_MODEL,
     NINEROUTER_FALLBACK_MODEL,
@@ -55,6 +74,7 @@ from config import (
     LLM_RATE_LIMIT_MAX_WAIT_SECONDS,
     LLM_MAX_INPUT_CHARS,
     LLM_MAX_OUTPUT_TOKENS,
+    LLM_RESPONSE_FORMAT_JSON_OBJECT,
     RETRY_AFTER_BUFFER_SECONDS,
     LLM_CANDIDATE_THRESHOLD,
 )
@@ -81,6 +101,85 @@ _REPORT_TOP_CATEGORIES_COUNT = 8
 _REPORT_TOP_LOCATIONS_COUNT = 15
 _REPORT_TOP_SALARY_COUNT = 20
 _REPORT_TOP_MISSING_SKILLS_COUNT = 50
+
+# Rolling log under the progress bar when LLM + verbose (shows cache vs API, waits, errors).
+_ACTIVITY_LOG_MAX_LINES = 8
+_LOG_LINE_MAX_CHARS = 100
+
+_activity_rotating_logger: logging.Logger | None = None
+
+
+def _get_activity_rotating_logger() -> logging.Logger:
+    """Singleton logger writing the same lines as the Live panel to a size-rotating file."""
+    global _activity_rotating_logger
+    if _activity_rotating_logger is not None:
+        return _activity_rotating_logger
+
+    log_path = Path(OUTPUT_DIR) / ANALYSIS_ACTIVITY_LOG_FILENAME
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("stackpulse.analysis.activity")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    handler = RotatingFileHandler(
+        log_path,
+        maxBytes=ANALYSIS_ACTIVITY_LOG_MAX_BYTES,
+        backupCount=ANALYSIS_ACTIVITY_LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    )
+    logger.addHandler(handler)
+    logger.propagate = False
+    _activity_rotating_logger = logger
+    return logger
+
+
+class AnalysisActivityLog:
+    """Fixed-size ring buffer of status lines for Live + LLM progress UI."""
+
+    __slots__ = ("_lines", "_mirror_to_file")
+
+    def __init__(
+        self,
+        maxlen: int = _ACTIVITY_LOG_MAX_LINES,
+        *,
+        mirror_to_file: bool = True,
+    ) -> None:
+        self._lines: deque[str] = deque(maxlen=maxlen)
+        self._mirror_to_file = mirror_to_file
+
+    def push(self, line: str) -> None:
+        raw = line.strip()
+        if not raw:
+            return
+        display = raw
+        if len(raw) > _LOG_LINE_MAX_CHARS:
+            display = raw[: _LOG_LINE_MAX_CHARS - 1] + "…"
+        self._lines.append(display)
+        if self._mirror_to_file:
+            _get_activity_rotating_logger().info("%s", raw)
+
+    def render(self) -> str:
+        if not self._lines:
+            return "[dim]Waiting for first job…[/dim]"
+        # Titles/URLs may contain "[" — escape so Rich does not treat them as markup.
+        return "\n".join(escape(line) for line in self._lines)
+
+
+def _llm_emit(activity_log: AnalysisActivityLog | None, message: str) -> None:
+    """Append to Live activity log, or print when no log (legacy / non-UI callers)."""
+    if activity_log is not None:
+        activity_log.push(message)
+    else:
+        print(message)
+
+
+def _activity_log_only(activity_log: AnalysisActivityLog | None, message: str) -> None:
+    """Rich Live lines only — never print (keeps non-verbose CLI runs quiet on cache/API noise)."""
+    if activity_log is not None:
+        activity_log.push(message)
 
 
 # ── LLM extraction ────────────────────────────────────────────────────────────
@@ -120,12 +219,38 @@ Return ONLY JSON:
 
 Rules:
 - "matched" must contain ONLY exact terms from the catalog above, lowercase
+- "matched" and "new_terms" must be valid JSON only: comma-separated quoted strings and objects — no sentences, no phrases like "is not mentioned", and no commentary inside or between array elements
 - "new_terms": only include specific, concrete technologies, tools, libraries, or protocols — NOT generic concepts like "debugging", "scalability", "containerization", "restful apis", "ci/cd pipelines", "async programming", "design patterns"
 - Do NOT include soft skills or company names
-- Return ONLY the JSON, no explanation
+- Return ONLY the JSON, no explanation; malformed JSON is discarded
 
 Job description:
 """
+
+
+def _normalize_text_for_llm(text: str) -> str:
+    """Clean job title + description before sending to the LLM.
+
+    Scraped HTML/JSON often contains CRLF runs, NBSPs, zero-width characters, and
+    choppy line breaks (e.g. ``assessment.\\nWe may``). Models may mirror that
+    structure and emit malformed or truncated pseudo-JSON. Normalizing yields plain
+    prose paragraphs for a more stable completion.
+    """
+    if not text:
+        return ""
+    text = text.replace("\x00", "")
+    for z in ("\u200b", "\u200c", "\u200d", "\ufeff"):
+        text = text.replace(z, "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\t", " ")
+    text = unicodedata.normalize("NFKC", text)
+    lines: list[str] = []
+    for line in text.split("\n"):
+        line = re.sub(r"[ \u00a0]+", " ", line).strip()
+        lines.append(line)
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _parse_retry_after(error_message: str) -> int | None:
@@ -148,22 +273,182 @@ def _parse_retry_after(error_message: str) -> int | None:
     return None
 
 
-def _llm_call(client, model: str, prompt: str, text: str) -> dict:
-    """Execute a single LLM extraction call and return parsed JSON.
+def _repair_json_trailing_commas(s: str) -> str:
+    """Remove illegal trailing commas before ``}`` or ``]`` (common LLM mistakes)."""
+    out = s
+    for _ in range(16):
+        nxt = re.sub(r",(\s*[\]}])", r"\1", out)
+        if nxt == out:
+            break
+        out = nxt
+    return out
 
-    Raises on any error — callers handle retries and fallback.
-    """
-    response = client.chat.completions.create(
+
+def _slice_first_json_object(raw: str) -> str | None:
+    """Return the first balanced ``{ ... }`` slice, respecting JSON string escapes."""
+    start = raw.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return raw[start : i + 1]
+    return None
+
+
+def _parse_llm_json(raw: str) -> dict:
+    """Parse model output as JSON; tolerate extra prose, trailing commas, fenced noise."""
+    text = raw.strip()
+    if not text:
+        raise ValueError("LLM returned empty content")
+
+    bases: list[str] = [text]
+    sliced = _slice_first_json_object(text)
+    if sliced and sliced not in bases:
+        bases.append(sliced)
+
+    last_err: Exception | None = None
+    for base in bases:
+        for variant in (base, _repair_json_trailing_commas(base)):
+            try:
+                out = json.loads(variant)
+            except json.JSONDecodeError as err:
+                last_err = err
+                continue
+            if isinstance(out, dict):
+                return out
+            last_err = ValueError("LLM JSON root must be an object")
+    preview = text[:320] + ("…" if len(text) > 320 else "")
+    raise ValueError(
+        f"LLM output was not valid JSON (preview): {preview!r}"
+    ) from last_err
+
+
+def _format_llm_error(exc: BaseException) -> str:
+    """Short, actionable message for logs (avoid dumping full 404 bodies every job)."""
+    s = str(exc)
+    low = s.lower()
+    if "404" in s and (
+        "credential" in low
+        or "model_not_found" in low
+        or "no active" in low
+        or "invalid_request_error" in low
+    ):
+        return (
+            "404: provider/model unavailable in 9router "
+            "(use NINEROUTER_MODEL=9router-combo or add provider credentials)"
+        )
+    if len(s) > 200:
+        return s[:200] + "…"
+    return s
+
+
+_LLM_JSON_PARSE_REPAIR_SUFFIX = (
+    "\n\nIMPORTANT: Your previous reply was not valid JSON. "
+    "Output exactly one JSON object. In \"matched\" and \"new_terms\", "
+    "use only comma-separated quoted strings and objects; do not write sentences, "
+    "explanations, or commentary inside arrays.\n"
+)
+
+
+def _strip_llm_fences(raw: str) -> str:
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return text
+
+
+def _response_format_unsupported(exc: BaseException) -> bool:
+    """True if the server likely rejected OpenAI ``response_format`` (retry without it)."""
+    msg = str(exc).lower()
+    if "response_format" in msg or "json_object" in msg:
+        return True
+    code = getattr(exc, "status_code", None)
+    if code == 400 and "parameter" in msg and (
+        "unknown" in msg or "unsupported" in msg or "invalid" in msg
+    ):
+        return True
+    return False
+
+
+def _llm_chat_completions_create(client, model: str, user_content: str):
+    """Call chat completions; optional ``json_object`` mode with one downgrade retry."""
+    from openai import APIError
+
+    create_kwargs = dict(
         model=model,
-        messages=[{"role": "user", "content": prompt + text[:LLM_MAX_INPUT_CHARS]}],
+        messages=[{"role": "user", "content": user_content}],
         max_tokens=LLM_MAX_OUTPUT_TOKENS,
         temperature=0,
     )
-    raw = response.choices[0].message.content.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-    return json.loads(raw)
+    if not LLM_RESPONSE_FORMAT_JSON_OBJECT:
+        return client.chat.completions.create(**create_kwargs)
+    try:
+        return client.chat.completions.create(
+            **create_kwargs,
+            response_format={"type": "json_object"},
+        )
+    except APIError as err:
+        if _response_format_unsupported(err):
+            return client.chat.completions.create(**create_kwargs)
+        raise
+
+
+def _llm_call(
+    client,
+    model: str,
+    prompt: str,
+    text: str,
+    activity_log: AnalysisActivityLog | None = None,
+) -> dict:
+    """Execute a single LLM extraction call and return parsed JSON.
+
+    On invalid JSON from the model, retries once with a stricter suffix (same HTTP/429 rules as callers).
+
+    Raises on any error — callers handle retries and fallback.
+    """
+    body = text[:LLM_MAX_INPUT_CHARS]
+    user_content = prompt + body
+
+    response = _llm_chat_completions_create(client, model, user_content)
+    raw = response.choices[0].message.content
+    if raw is None:
+        raise ValueError("LLM returned no message content")
+    raw = _strip_llm_fences(raw)
+
+    try:
+        return _parse_llm_json(raw)
+    except ValueError:
+        _activity_log_only(
+            activity_log,
+            "   LLM: invalid JSON — retrying with stricter instruction…",
+        )
+        user_content = prompt + body + _LLM_JSON_PARSE_REPAIR_SUFFIX
+        response = _llm_chat_completions_create(client, model, user_content)
+        raw = response.choices[0].message.content
+        if raw is None:
+            raise ValueError("LLM returned no message content")
+        raw = _strip_llm_fences(raw)
+        return _parse_llm_json(raw)
 
 
 def _call_llm_with_retry(
@@ -173,6 +458,7 @@ def _call_llm_with_retry(
     text: str,
     url: str,
     attempt_label: str,
+    activity_log: AnalysisActivityLog | None = None,
 ) -> dict | None:
     """Execute one LLM call with at most one retry on short 429 windows."""
     import json as _json
@@ -180,28 +466,37 @@ def _call_llm_with_retry(
     from openai import APIConnectionError, APIError, RateLimitError
 
     try:
-        return _llm_call(client, model, prompt, text)
+        return _llm_call(client, model, prompt, text, activity_log=activity_log)
     except RateLimitError as rate_limit_error:
         wait_seconds = _parse_retry_after(str(rate_limit_error))
         if wait_seconds is not None and wait_seconds <= LLM_RATE_LIMIT_MAX_WAIT_SECONDS:
-            print(
-                f"  [LLM] 429 on {attempt_label} — sleeping {wait_seconds}s then retrying …"
+            _llm_emit(
+                activity_log,
+                f"   [LLM] 429 ({attempt_label}) — sleep {wait_seconds}s, retry…",
             )
             time.sleep(wait_seconds)
             try:
-                return _llm_call(client, model, prompt, text)
+                return _llm_call(
+                    client, model, prompt, text, activity_log=activity_log
+                )
             except RateLimitError as retry_error:
-                print(f"  [LLM] 429 again after retry ({attempt_label}): {retry_error}")
+                _llm_emit(
+                    activity_log,
+                    f"   [LLM] 429 again ({attempt_label}): {retry_error}",
+                )
                 return None
 
         wait_display = f"{wait_seconds}s" if wait_seconds else "unknown"
-        print(
-            f"  [LLM] 429 on {attempt_label} — wait {wait_display} exceeds limit, "
-            f"skipping primary"
+        _llm_emit(
+            activity_log,
+            f"   [LLM] 429 ({attempt_label}) — wait {wait_display} exceeds limit, skip",
         )
         return None
     except (APIError, APIConnectionError, _json.JSONDecodeError, ValueError) as error:
-        print(f"  [LLM] Warning: extraction failed for {url[:60]}: {error}")
+        _llm_emit(
+            activity_log,
+            f"   [LLM] failed {url[:60]}…: {_format_llm_error(error)}",
+        )
         return None
 
 
@@ -210,6 +505,7 @@ def _extract_skills_with_models(
     url: str,
     client,
     prompt: str,
+    activity_log: AnalysisActivityLog | None = None,
 ) -> dict | None:
     """Run primary model, then optional fallback model on failure."""
     result = _call_llm_with_retry(
@@ -219,6 +515,7 @@ def _extract_skills_with_models(
         text,
         url,
         NINEROUTER_MODEL,
+        activity_log=activity_log,
     )
     if result is not None:
         return result
@@ -226,7 +523,7 @@ def _extract_skills_with_models(
     if not NINEROUTER_FALLBACK_MODEL:
         return None
 
-    print(f"  [LLM] Trying fallback model: {NINEROUTER_FALLBACK_MODEL}")
+    _llm_emit(activity_log, f"   [LLM] primary failed — trying {NINEROUTER_FALLBACK_MODEL}")
     return _call_llm_with_retry(
         client,
         NINEROUTER_FALLBACK_MODEL,
@@ -234,6 +531,7 @@ def _extract_skills_with_models(
         text,
         url,
         f"fallback:{NINEROUTER_FALLBACK_MODEL}",
+        activity_log=activity_log,
     )
 
 
@@ -286,6 +584,7 @@ def extract_skills_llm(
     client,
     prompt: str = "",
     taxonomy: dict[str, list[tuple[str, str]]] | None = None,
+    activity_log: AnalysisActivityLog | None = None,
 ) -> dict[str, list[str]]:
     """Call LLM via 9router to extract skills. Uses DB cache to avoid re-calls.
 
@@ -293,19 +592,42 @@ def extract_skills_llm(
       - If the suggested wait is ≤ LLM_RATE_LIMIT_MAX_WAIT_SECONDS, sleeps and retries once.
       - If NINEROUTER_FALLBACK_MODEL is configured, tries that next.
       - Otherwise logs a warning and returns {}.
+
+    ``activity_log`` (when set) receives human-readable lines for the Live progress UI.
     """
     cache_key = _url_key(url)
     cached = _llm_cache_get(conn, cache_key)
     if cached is not None:
+        _activity_log_only(activity_log, "   LLM: cache hit (no HTTP)")
         return cached
 
-    result = _extract_skills_with_models(text, url, client, prompt)
+    text = _normalize_text_for_llm(text)
+
+    _activity_log_only(
+        activity_log,
+        f"   LLM: calling {NINEROUTER_MODEL} — waiting on API…",
+    )
+    t0 = time.perf_counter()
+    result = _extract_skills_with_models(
+        text, url, client, prompt, activity_log=activity_log
+    )
+    elapsed = time.perf_counter() - t0
     if result is None:
+        _activity_log_only(
+            activity_log,
+            f"   LLM: no usable JSON after {elapsed:.1f}s",
+        )
         return {}
 
     # Normalize LLM output before caching
     if taxonomy is not None:
         result = _normalize_llm_result(result, taxonomy)
+
+    n_terms = sum(len(v) for v in result.values())
+    _activity_log_only(
+        activity_log,
+        f"   LLM: OK in {elapsed:.1f}s → {n_terms} skill row(s) to store",
+    )
 
     _llm_cache_set(conn, url, cache_key, result)
     return result
@@ -403,66 +725,203 @@ def _build_comprehensive_by_category(
     return merged
 
 
+def _analyze_job_row(
+    job: dict,
+    taxonomy: dict[str, list[tuple[str, str]]],
+    llm_client,
+    conn: sqlite3.Connection | None,
+    llm_prompt: str,
+    activity_log: AnalysisActivityLog | None,
+) -> dict:
+    """One job → one DataFrame row dict (regex + optional LLM)."""
+    description = job.get("job_description") or ""
+    title = job.get("job_title") or ""
+    combined_text = f"{title} {description}"
+    url = job.get("linkedin_url", "")
+
+    skills_found = extract_skills(combined_text, taxonomy)
+
+    llm_skills: dict[str, list[str]] = {}
+    if llm_client and conn is not None:
+        llm_skills = extract_skills_llm(
+            combined_text,
+            url,
+            conn,
+            llm_client,
+            prompt=llm_prompt,
+            taxonomy=taxonomy,
+            activity_log=activity_log,
+        )
+
+    skills_by_cat = _build_comprehensive_by_category(
+        skills_found,
+        llm_skills,
+        taxonomy,
+    )
+
+    regex_skills_flat = [skill for hits in skills_found.values() for skill in hits]
+    all_skills_comprehensive = [
+        skill for hits in skills_by_cat.values() for skill in hits
+    ]
+
+    return {
+        "job_title": job.get("job_title"),
+        "company": job.get("company"),
+        "location": job.get("location"),
+        "search_location": job.get("search_location"),
+        "posted_date": job.get("posted_date"),
+        "salary_extracted": job.get("salary_extracted"),
+        "linkedin_url": url,
+        "scraped_date": job.get("scraped_date"),
+        "applicant_count": job.get("applicant_count"),
+        "skills_raw": skills_found,
+        "skills_by_category": skills_by_cat,
+        "all_skills_flat": regex_skills_flat,
+        "all_skills_comprehensive": all_skills_comprehensive,
+        "skills_llm": llm_skills,
+        "has_description": bool(description.strip()),
+    }
+
+
 def analyze(
     jobs: list[dict],
     taxonomy: dict[str, list[tuple[str, str]]],
     llm_client=None,
     conn: sqlite3.Connection | None = None,
+    *,
+    verbose: bool = True,
+    activity_log_file: bool = True,
 ) -> pd.DataFrame:
-    """Build a DataFrame with per-job metadata and extracted skills."""
-    # Build skills-aware prompt once for the entire run
+    """Build a DataFrame with per-job metadata and extracted skills.
+
+    When ``verbose`` is True and LLM is enabled, shows a Rich progress bar plus a
+    rolling log of cache hits, API waits, and responses. Regex-only runs use a
+    simple progress bar.
+
+    When ``activity_log_file`` is True (default), the same lines are appended to
+    ``data/analysis_activity.log`` with size rotation (see config).
+    """
     llm_prompt = _build_llm_prompt(taxonomy) if llm_client else ""
 
-    job_rows = []
-    for job in jobs:
-        description = job.get("job_description") or ""
-        title = job.get("job_title") or ""
-        combined_text = f"{title} {description}"
-        url = job.get("linkedin_url", "")
+    _bar_label = (
+        "Per-job: regex + LLM"
+        if llm_client
+        else "Per-job: regex taxonomy"
+    )
 
-        skills_found = extract_skills(combined_text, taxonomy)
+    use_llm_live_ui = (
+        verbose
+        and llm_client is not None
+        and conn is not None
+        and len(jobs) > 0
+    )
+    use_llm_quiet_file_log = (
+        not verbose
+        and activity_log_file
+        and llm_client is not None
+        and conn is not None
+        and len(jobs) > 0
+    )
 
-        llm_skills: dict[str, list[str]] = {}
-        if llm_client and conn is not None:
-            llm_skills = extract_skills_llm(
-                combined_text,
-                url,
-                conn,
-                llm_client,
-                prompt=llm_prompt,
-                taxonomy=taxonomy,
+    job_rows: list[dict] = []
+
+    if use_llm_live_ui:
+        activity_log = AnalysisActivityLog(mirror_to_file=activity_log_file)
+        if activity_log_file:
+            _get_activity_rotating_logger().info(
+                "=== session start | %d job(s) | LLM + verbose ===",
+                len(jobs),
+            )
+        progress = Progress(
+            TextColumn("[bold]{task.description}"),
+            BarColumn(bar_width=None),
+            MofNCompleteColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            console=console,
+            transient=False,
+        )
+        task_id = progress.add_task(_bar_label, total=len(jobs))
+        total = len(jobs)
+
+        def render_live() -> Group:
+            return Group(
+                progress,
+                Panel(
+                    activity_log.render(),
+                    title="[bold cyan]LLM & pipeline[/bold cyan]",
+                    subtitle=f"[dim]last {_ACTIVITY_LOG_MAX_LINES} lines[/dim]",
+                    border_style="dim",
+                    padding=(0, 1),
+                ),
             )
 
-        # Unified per-category dict (regex + LLM merged)
-        skills_by_cat = _build_comprehensive_by_category(
-            skills_found,
-            llm_skills,
-            taxonomy,
+        with Live(
+            render_live(),
+            console=console,
+            refresh_per_second=12,
+        ) as live:
+            for idx, job in enumerate(jobs, start=1):
+                title_raw = (job.get("job_title") or "—").strip() or "—"
+                _activity_log_only(
+                    activity_log,
+                    f"[{idx}/{total}] {title_raw}",
+                )
+                job_rows.append(
+                    _analyze_job_row(
+                        job,
+                        taxonomy,
+                        llm_client,
+                        conn,
+                        llm_prompt,
+                        activity_log,
+                    )
+                )
+                progress.advance(task_id)
+                live.update(render_live())
+        return pd.DataFrame(job_rows)
+
+    if use_llm_quiet_file_log:
+        activity_log = AnalysisActivityLog(mirror_to_file=True)
+        _get_activity_rotating_logger().info(
+            "=== session start | %d job(s) | LLM + quiet | file log only ===",
+            len(jobs),
         )
+        total = len(jobs)
+        for idx, job in enumerate(jobs, start=1):
+            title_raw = (job.get("job_title") or "—").strip() or "—"
+            _activity_log_only(
+                activity_log,
+                f"[{idx}/{total}] {title_raw}",
+            )
+            job_rows.append(
+                _analyze_job_row(
+                    job,
+                    taxonomy,
+                    llm_client,
+                    conn,
+                    llm_prompt,
+                    activity_log,
+                )
+            )
+        return pd.DataFrame(job_rows)
 
-        regex_skills_flat = [skill for hits in skills_found.values() for skill in hits]
-        all_skills_comprehensive = [
-            skill for hits in skills_by_cat.values() for skill in hits
-        ]
-
+    job_iter = track(
+        jobs,
+        description=_bar_label,
+        total=len(jobs),
+        disable=not verbose or len(jobs) == 0,
+    )
+    for job in job_iter:
         job_rows.append(
-            {
-                "job_title": job.get("job_title"),
-                "company": job.get("company"),
-                "location": job.get("location"),
-                "search_location": job.get("search_location"),
-                "posted_date": job.get("posted_date"),
-                "salary_extracted": job.get("salary_extracted"),
-                "linkedin_url": url,
-                "scraped_date": job.get("scraped_date"),
-                "applicant_count": job.get("applicant_count"),
-                "skills_raw": skills_found,
-                "skills_by_category": skills_by_cat,
-                "all_skills_flat": regex_skills_flat,
-                "all_skills_comprehensive": all_skills_comprehensive,
-                "skills_llm": llm_skills,
-                "has_description": bool(description.strip()),
-            }
+            _analyze_job_row(
+                job,
+                taxonomy,
+                llm_client,
+                conn,
+                llm_prompt,
+                None,
+            )
         )
 
     return pd.DataFrame(job_rows)
@@ -867,6 +1326,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show pending skill candidates queue (no analysis)",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Minimal progress (no per-job progress bar; default is verbose)",
+    )
+    parser.add_argument(
+        "--no-activity-log-file",
+        action="store_true",
+        help="Do not append LLM/pipeline lines to data/analysis_activity.log",
+    )
     return parser
 
 
@@ -938,7 +1407,14 @@ def main() -> None:
             return
 
         paths, skills, jobs, llm_client = run_context
-        df = analyze(jobs, skills, llm_client=llm_client, conn=conn)
+        df = analyze(
+            jobs,
+            skills,
+            llm_client=llm_client,
+            conn=conn,
+            verbose=not args.quiet,
+            activity_log_file=not args.no_activity_log_file,
+        )
 
         if args.llm and llm_client:
             promote_llm_to_candidates(conn, threshold=LLM_CANDIDATE_THRESHOLD)

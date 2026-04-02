@@ -1,6 +1,10 @@
 from __future__ import annotations
 from typing import Coroutine, Optional, TypeVar
 
+import patchright_shim
+
+patchright_shim.install()
+
 import argparse
 import asyncio
 import subprocess
@@ -9,6 +13,12 @@ from pathlib import Path
 import typer
 from rich.traceback import install as install_rich_traceback
 from config import LLM_CANDIDATE_THRESHOLD
+from analysis_candidates import (
+    apply_candidates,
+    approve_candidate,
+    get_pending_candidates,
+    reject_candidate,
+)
 from ui_rich import (
     console,
     make_table,
@@ -35,6 +45,96 @@ def default_command(ctx: typer.Context) -> None:
         _interactive_wizard()
 
 
+def review_skills_command() -> None:
+    """Open the skills DB and interactively accept or reject pending LLM candidates."""
+    try:
+        import analyze as analyzer
+
+        data_dir = Path(analyzer.OUTPUT_DIR)
+        conn = analyzer.open_db(data_dir)
+        try:
+            analyzer.init_db(conn)
+            pending = get_pending_candidates(conn)
+            if not pending:
+                print_warning(
+                    "No pending skill candidates. Run: stackpulse analyze --all --llm"
+                )
+                return
+
+            print_section("Review LLM skill candidates")
+            table = make_table("Pending queue (highest job count first)", expand=True)
+            table.add_column("Term", style="bold")
+            table.add_column("Category", overflow="fold")
+            table.add_column("Jobs", justify="right")
+            for row in pending:
+                table.add_row(row["term"], row["category"], str(row["jobs_count"]))
+            console.print(table)
+            print_info(
+                "Bulk: promote every pending term with jobs_count ≥ N. "
+                "Individual: step through each term."
+            )
+            mode = typer.prompt(
+                "[b]ulk  [i]ndividual  [q]uit", default="i"
+            ).strip().lower()[:1]
+            if mode == "q":
+                return
+            if mode == "b":
+                default_n = str(LLM_CANDIDATE_THRESHOLD)
+                n_raw = typer.prompt("Minimum jobs to promote", default=default_n)
+                try:
+                    n = max(1, int(n_raw.strip()))
+                except ValueError:
+                    n = LLM_CANDIDATE_THRESHOLD
+                apply_candidates(conn, n)
+                return
+            if mode != "i":
+                print_warning("Unknown choice; exiting.")
+                return
+            _walkthrough_skill_candidates(conn, pending)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        print_error(f"review-skills failed: {exc}")
+        raise typer.Exit(code=1) from exc
+
+
+def _walkthrough_skill_candidates(conn, pending: list) -> None:
+    total = len(pending)
+    for idx, row in enumerate(pending, start=1):
+        print_panel(
+            f"Candidate {idx} / {total}",
+            [
+                f"Term: {row['term']}",
+                f"Category: {row['category']}",
+                f"Jobs: {row['jobs_count']}",
+            ],
+            style="cyan",
+        )
+        action = typer.prompt(
+            "[a]pprove  [r]eject  [s]kip  [q]uit",
+            default="a",
+        ).strip().lower()[:1]
+        if action == "a":
+            if approve_candidate(conn, row["term"], row["category_id"]):
+                conn.commit()
+                print_success(f"Added {row['term']!r} to the skills catalog.")
+            else:
+                print_warning("Could not approve (already decided?).")
+        elif action == "r":
+            if reject_candidate(conn, row["term"], row["category_id"]):
+                conn.commit()
+                print_info(f"Rejected {row['term']!r}.")
+            else:
+                print_warning("Could not reject (already decided?).")
+        elif action == "s":
+            continue
+        elif action == "q":
+            print_info("Stopped; remaining candidates stay pending.")
+            break
+        else:
+            print_warning("Unknown choice; use a/r/s/q.")
+
+
 def _interactive_wizard() -> None:
     """Prompt the user for what to run when stackpulse is called with no args."""
     print_section("StackPulse")
@@ -44,12 +144,17 @@ def _interactive_wizard() -> None:
     console.print("  2  scrape         Scrape LinkedIn for new jobs")
     console.print("  3  auto           Bootstrap + scrape + analyze end-to-end")
     console.print("  4  setup-session  Create or refresh LinkedIn session")
-    console.print("  5  quit\n")
+    console.print("  5  review-skills  Accept or reject LLM skill candidates (queue)")
+    console.print("  6  quit\n")
 
-    choice = typer.prompt("Choice [1-5]", default="1")
+    choice = typer.prompt("Choice [1-6]", default="1")
 
-    if choice == "5" or choice.lower() == "quit":
+    if choice == "6" or choice.lower() == "quit":
         raise typer.Exit()
+
+    if choice == "5":
+        review_skills_command()
+        return
 
     if choice == "2":
         limit_str = typer.prompt(
@@ -59,7 +164,15 @@ def _interactive_wizard() -> None:
         fresh = typer.confirm(
             "Ignore previously scraped URLs (--fresh)?", default=False
         )
-        scrape(limit=limit, fresh=fresh)
+        print_info(
+            "Default: fast (HTTP guest, no login, fastest). "
+            "Optional: browser = Patchright + session — use when you need applicant_count / logged-in DOM."
+        )
+        mode_raw = typer.prompt(
+            "Mode [fast/browser]", default="fast"
+        ).strip().lower()
+        mode = mode_raw if mode_raw in ("browser", "fast") else "fast"
+        scrape(limit=limit, fresh=fresh, mode=mode)
 
     elif choice == "3":
         limit_str = typer.prompt(
@@ -69,6 +182,13 @@ def _interactive_wizard() -> None:
         fresh = typer.confirm(
             "Ignore previously scraped URLs (--fresh)?", default=False
         )
+        print_info(
+            "Default: fast (HTTP guest). Optional browser = Patchright + session for applicant_count / richer pages."
+        )
+        mode_raw = typer.prompt(
+            "Mode [fast/browser]", default="fast"
+        ).strip().lower()
+        mode = mode_raw if mode_raw in ("browser", "fast") else "fast"
         all_files = typer.confirm("Analyze all jobs files (--all)?", default=True)
         llm = typer.confirm("Enable LLM extraction (--llm)?", default=False)
         auto(
@@ -79,6 +199,7 @@ def _interactive_wizard() -> None:
             promote=None,
             venv=Path(".venv"),
             python=sys.executable,
+            scrape_mode=mode,
         )
 
     elif choice == "4":
@@ -104,6 +225,9 @@ def _interactive_wizard() -> None:
             candidates=False,
             title_contains=title_contains,
             location_contains=location_contains,
+            view="detailed",
+            verbose=True,
+            activity_log_file=True,
         )
 
 
@@ -138,7 +262,10 @@ def _ensure_venv(venv_path: Path, python: str, repo_root: Path) -> tuple[str, st
 
 
 def _deps_installed(venv_python: Path) -> bool:
-    probe = "import linkedin_scraper, playwright, dotenv, pandas, openpyxl, openai, typer, rich"
+    probe = (
+        "import linkedin_scraper, patchright, dotenv, pandas, openpyxl, openai, "
+        "typer, rich, bs4, requests, lxml"
+    )
     try:
         subprocess.run(
             [str(venv_python), "-c", probe],
@@ -190,11 +317,15 @@ def _ensure_chromium(venv_python: Path, repo_root: Path) -> tuple[str, str, str]
         )
 
     _run_command(
-        [str(venv_python), "-m", "playwright", "install", "chromium"],
-        "Installing Playwright Chromium",
+        [str(venv_python), "-m", "patchright", "install", "chromium"],
+        "Installing Patchright Chromium",
         cwd=repo_root,
     )
-    return ("Install Chromium", "[green]done[/green]", "playwright install chromium")
+    return (
+        "Install Chromium",
+        "[green]done[/green]",
+        "python -m patchright install chromium",
+    )
 
 
 def _ensure_session(
@@ -238,14 +369,18 @@ def setup_session_command() -> None:
 
 
 def _run_async(coro: Coroutine[object, object, T]) -> T:
-    """Run an async coroutine, suppressing Playwright teardown noise on Ctrl+C."""
+    """Run an async coroutine, suppressing browser teardown noise on Ctrl+C."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     def _exc_handler(_loop, ctx):
         exc = ctx.get("exception")
-        if exc is not None and "TargetClosedError" in type(exc).__name__:
-            return
+        if exc is not None:
+            if "TargetClosedError" in type(exc).__name__:
+                return
+            # Avoid noisy "Task exception was never retrieved" on Ctrl+C / cancel during teardown
+            if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
+                return
         _loop.default_exception_handler(ctx)
 
     loop.set_exception_handler(_exc_handler)
@@ -285,19 +420,49 @@ def scrape(
         None, "--limit", min=1, help="Max jobs per query"
     ),
     fresh: bool = typer.Option(False, "--fresh", help="Ignore previously scraped URLs"),
+    mode: str = typer.Option(
+        "fast",
+        "--mode",
+        help="fast (default): HTTP guest API, no browser. browser: Patchright + session — use for applicant_count.",
+        case_sensitive=False,
+    ),
 ) -> None:
     """Run scraper using current config defaults unless overridden."""
     try:
         from config import JOBS_PER_QUERY
-        from scrape import scrape_all
 
         effective_limit = limit if limit is not None else JOBS_PER_QUERY
+        mode_norm = mode.strip().lower()
+        if mode_norm not in ("browser", "fast"):
+            print_error("Invalid --mode: use 'browser' or 'fast'.")
+            raise typer.Exit(code=2)
+
         with console.status("[bold cyan]Running scrape workflow...", spinner="dots"):
-            _run_async(scrape_all(limit_per_query=effective_limit, fresh=fresh))
+            if mode_norm == "fast":
+                from scrape_fast import scrape_all_fast
+
+                interrupted = _run_async(
+                    scrape_all_fast(limit_per_query=effective_limit, fresh=fresh)
+                )
+            else:
+                from scrape import scrape_all
+
+                interrupted = _run_async(
+                    scrape_all(limit_per_query=effective_limit, fresh=fresh)
+                )
+        if interrupted:
+            print_warning(
+                "Scrape stopped (Ctrl+C). Progress and resume position are saved — "
+                "run the same command again to continue."
+            )
+            raise typer.Exit(code=130)
         print_success("Scrape completed.")
-    except KeyboardInterrupt as exc:
-        print_warning("Scrape interrupted by user.")
-        raise typer.Exit(code=130) from exc
+    except KeyboardInterrupt:
+        print_warning(
+            "Scrape interrupted (Ctrl+C). If the run did not finish saving, start again — "
+            "data is written after each job."
+        )
+        raise typer.Exit(code=130) from None
     except Exception as exc:  # noqa: BLE001
         print_error(f"scrape failed: {exc}")
         raise typer.Exit(code=1) from exc
@@ -312,6 +477,8 @@ def _run_analysis_pipeline(
     use_llm: bool,
     title_contains: Optional[str],
     location_contains: Optional[str],
+    verbose: bool = True,
+    activity_log_file: bool = True,
 ) -> None:
     """Execute the core analysis pipeline: load → filter → analyze → report → export.
 
@@ -321,11 +488,17 @@ def _run_analysis_pipeline(
     print_info("Preparing analysis context")
 
     if promote is not None:
+        if verbose:
+            print_info(f"Applying skill candidate promotions (threshold ≥ {promote})…")
         analyzer.apply_candidates(conn, promote)
 
+    if verbose:
+        print_info("Loading skills taxonomy from database…")
     skills = analyzer.load_skills(conn)
     term_count = sum(len(terms) for terms in skills.values())
 
+    if verbose:
+        print_info(f"Loading job JSON ({len(paths)} file(s))…")
     jobs = analyzer.load_jobs(paths)
 
     summary = make_table("Run Summary", expand=True)
@@ -344,14 +517,16 @@ def _run_analysis_pipeline(
             for j in jobs
             if title_contains.lower() in (j.get("job_title") or "").lower()
         ]
-        print_info(f"Title filter '{title_contains}' → {len(jobs)} jobs")
+        if verbose:
+            print_info(f"Title filter '{title_contains}' → {len(jobs)} jobs")
     if location_contains:
         jobs = [
             j
             for j in jobs
             if location_contains.lower() in (j.get("location") or "").lower()
         ]
-        print_info(f"Location filter '{location_contains}' → {len(jobs)} jobs")
+        if verbose:
+            print_info(f"Location filter '{location_contains}' → {len(jobs)} jobs")
 
     if not jobs:
         print_warning("No jobs left after filters. Nothing to analyze.")
@@ -359,18 +534,43 @@ def _run_analysis_pipeline(
 
     llm_client = None
     if use_llm:
+        if verbose:
+            print_info("Initializing LLM client (9router)…")
         llm_client = analyzer.build_llm_client(
             analyzer.NINEROUTER_BASE_URL,
             analyzer.NINEROUTER_MODEL,
             analyzer.NINEROUTER_API_KEY,
         )
 
-    with console.status(
-        "[bold cyan]Analyzing jobs and extracting skills...", spinner="dots"
-    ):
-        df = analyzer.analyze(jobs, skills, llm_client=llm_client, conn=conn)
+    if verbose:
+        print_info(
+            f"Running skills extraction on {len(jobs)} job(s)"
+            + (" (regex + LLM)…" if use_llm else " (regex taxonomy)…")
+        )
+        df = analyzer.analyze(
+            jobs,
+            skills,
+            llm_client=llm_client,
+            conn=conn,
+            verbose=True,
+            activity_log_file=activity_log_file,
+        )
+    else:
+        with console.status(
+            "[bold cyan]Analyzing jobs and extracting skills...", spinner="dots"
+        ):
+            df = analyzer.analyze(
+                jobs,
+                skills,
+                llm_client=llm_client,
+                conn=conn,
+                verbose=False,
+                activity_log_file=activity_log_file,
+            )
 
     if use_llm and llm_client:
+        if verbose:
+            print_info("Queueing LLM discoveries for skill promotion…")
         analyzer.promote_llm_to_candidates(conn, threshold=LLM_CANDIDATE_THRESHOLD)
 
     existing_candidate_terms = {
@@ -427,6 +627,16 @@ def analyze(
         help="Output density mode: detailed or compact",
         case_sensitive=False,
     ),
+    verbose: bool = typer.Option(
+        True,
+        "--verbose/--no-verbose",
+        help="Show step messages and per-job progress bar during analysis (default: on).",
+    ),
+    activity_log_file: bool = typer.Option(
+        True,
+        "--activity-log-file/--no-activity-log-file",
+        help="Append LLM/pipeline lines to data/analysis_activity.log (5 MiB rotation).",
+    ),
 ) -> None:
     """Analyze scraped jobs and export Excel output."""
     if file and all_files:
@@ -436,7 +646,9 @@ def analyze(
     try:
         import analyze as analyzer
 
-        set_display_mode(view.lower())
+        # Direct calls (e.g. interactive wizard) skip Typer; missing kwargs can be OptionInfo, not str.
+        view_mode = view if isinstance(view, str) else "detailed"
+        set_display_mode(view_mode.lower())
 
         data_dir = Path(analyzer.OUTPUT_DIR)
         conn = analyzer.open_db(data_dir)
@@ -467,12 +679,24 @@ def analyze(
                 llm,
                 title_contains,
                 location_contains,
+                verbose=verbose if isinstance(verbose, bool) else True,
+                activity_log_file=(
+                    activity_log_file
+                    if isinstance(activity_log_file, bool)
+                    else True
+                ),
             )
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001
         print_error(f"analyze failed: {exc}")
         raise typer.Exit(code=1) from exc
+
+
+@app.command("review-skills")
+def review_skills() -> None:
+    """Interactively accept or reject LLM-discovered skill candidates in the queue."""
+    review_skills_command()
 
 
 @app.command()
@@ -485,6 +709,12 @@ def auto(
         None, "--limit", min=1, help="Max jobs per query"
     ),
     fresh: bool = typer.Option(False, "--fresh", help="Ignore previously scraped URLs"),
+    scrape_mode: str = typer.Option(
+        "fast",
+        "--scrape-mode",
+        help="fast (default): HTTP guest. browser: Patchright + session for applicant_count / logged-in scrape.",
+        case_sensitive=False,
+    ),
     all_files: bool = typer.Option(False, "--all", help="Analyze all jobs files"),
     llm: bool = typer.Option(
         False, "--llm", help="Enable LLM extraction during analyze"
@@ -507,15 +737,34 @@ def auto(
 
         from config import JOBS_PER_QUERY, SESSION_FILE
 
-        rows.append(_ensure_session(venv_python, repo_root, SESSION_FILE))
+        sm = scrape_mode.strip().lower()
+        if sm not in ("browser", "fast"):
+            print_error("Invalid --scrape-mode: use 'browser' or 'fast'.")
+            raise typer.Exit(code=2)
+
+        if sm == "browser":
+            rows.append(_ensure_session(venv_python, repo_root, SESSION_FILE))
+        else:
+            rows.append(
+                (
+                    "Setup session",
+                    "[yellow]skip[/yellow]",
+                    "fast mode uses HTTP guest endpoints (no session.json)",
+                )
+            )
 
         scrape_limit = limit if limit is not None else JOBS_PER_QUERY
-        scrape_cmd = [str(venv_python), "scrape.py", "--limit", str(scrape_limit)]
+        scrape_script = "scrape_fast.py" if sm == "fast" else "scrape.py"
+        scrape_cmd = [str(venv_python), scrape_script, "--limit", str(scrape_limit)]
         if fresh:
             scrape_cmd.append("--fresh")
         _run_command(scrape_cmd, "Running scrape", cwd=repo_root)
         rows.append(
-            ("Scrape", "[green]done[/green]", f"limit={scrape_limit}, fresh={fresh}")
+            (
+                "Scrape",
+                "[green]done[/green]",
+                f"mode={sm}, limit={scrape_limit}, fresh={fresh}",
+            )
         )
 
         analyze_cmd = [str(venv_python), "analyze.py"]

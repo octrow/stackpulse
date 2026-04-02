@@ -135,6 +135,52 @@ def promote_llm_to_candidates(
     return newly_added_count
 
 
+def get_pending_candidates(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Return pending skill_candidates rows with category name, ordered for review."""
+    return conn.execute(
+        """SELECT sc.term, c.name AS category, sc.category_id, sc.jobs_count
+           FROM skill_candidates sc
+           JOIN categories c ON sc.category_id = c.id
+           WHERE sc.status = 'pending'
+           ORDER BY sc.jobs_count DESC, sc.term"""
+    ).fetchall()
+
+
+def approve_candidate(conn: sqlite3.Connection, term: str, category_id: int) -> bool:
+    """Insert term into skills and mark the pending candidate approved. Returns False if no matching pending row."""
+    row = conn.execute(
+        """SELECT 1 FROM skill_candidates
+           WHERE term = ? AND category_id = ? AND status = 'pending'""",
+        (term, category_id),
+    ).fetchone()
+    if not row:
+        return False
+    today = date.today().isoformat()
+    conn.execute(
+        "INSERT OR IGNORE INTO skills(category_id, term) VALUES (?,?)",
+        (category_id, term),
+    )
+    conn.execute(
+        """UPDATE skill_candidates
+           SET status = 'approved', decided_date = ?
+           WHERE term = ? AND category_id = ?""",
+        (today, term, category_id),
+    )
+    return True
+
+
+def reject_candidate(conn: sqlite3.Connection, term: str, category_id: int) -> bool:
+    """Mark a pending candidate rejected. Returns False if no matching pending row."""
+    today = date.today().isoformat()
+    cur = conn.execute(
+        """UPDATE skill_candidates
+           SET status = 'rejected', decided_date = ?
+           WHERE term = ? AND category_id = ? AND status = 'pending'""",
+        (today, term, category_id),
+    )
+    return cur.rowcount > 0
+
+
 def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
     """Promote pending candidates with jobs_count >= min_jobs into skills catalog.
 
@@ -167,19 +213,9 @@ def apply_candidates(conn: sqlite3.Connection, min_jobs: int = 2) -> int:
     table.add_column("Category", overflow="fold", max_width=28)
     table.add_column("Jobs", justify="right", width=6)
 
-    today = date.today().isoformat()
     for row in candidate_rows:
         table.add_row(row["term"], row["category"], str(row["jobs_count"]))
-        conn.execute(
-            "INSERT OR IGNORE INTO skills(category_id, term) VALUES (?,?)",
-            (row["category_id"], row["term"]),
-        )
-        conn.execute(
-            """UPDATE skill_candidates
-               SET status='approved', decided_date=?
-               WHERE term=? AND category_id=?""",
-            (today, row["term"], row["category_id"]),
-        )
+        approve_candidate(conn, row["term"], row["category_id"])
 
     console.print(table)
     conn.commit()

@@ -28,13 +28,19 @@ DELAY_BETWEEN_JOBS = 3
 # Seconds to wait between different search queries
 DELAY_BETWEEN_QUERIES = 5
 
+# Browser job search: LinkedIn paginates with `start=` (25 jobs per page in the UI).
+JOB_SEARCH_PAGE_SIZE = 25
+JOB_SEARCH_MAX_START = 1000
+# Pause between paginated search page navigations (same query, next ``start``)
+DELAY_BETWEEN_SEARCH_PAGES = 1.5
+
 # ── Playwright timeouts & settle waits ───────────────────────────────────────
 
 # Milliseconds to wait for the full page load (domcontentloaded)
 PAGE_LOAD_TIMEOUT_MS = 60_000
 
 # Milliseconds to wait for the job-title <h1> to appear (SPA render)
-H1_WAIT_TIMEOUT_MS = 15_000
+H1_WAIT_TIMEOUT_MS = 5_000
 
 # Milliseconds to wait when clicking "Show more" / "See more" buttons
 BUTTON_CLICK_TIMEOUT_MS = 3_000
@@ -63,24 +69,46 @@ OUTPUT_DIR = "data"
 # SQLite database filename (placed inside OUTPUT_DIR)
 DB_FILENAME = "skills.db"
 
+# Rotating text log: same lines as the Rich "LLM & pipeline" panel (`analyze --llm` + verbose)
+ANALYSIS_ACTIVITY_LOG_FILENAME = "analysis_activity.log"
+ANALYSIS_ACTIVITY_LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB per file before rotation
+ANALYSIS_ACTIVITY_LOG_BACKUP_COUNT = 5
+
 # Saved Playwright browser session (cookies + localStorage)
 SESSION_FILE = "session.json"
+
+# ── Fast (HTTP / guest API) scraper ───────────────────────────────────────────
+# Uses LinkedIn jobs-guest endpoints (no browser). Lower delays than Playwright;
+# more aggressive IP-based rate limits — use sparingly or with proxies if needed.
+
+FAST_DELAY_BETWEEN_JOBS = 1
+FAST_DELAY_BETWEEN_QUERIES = 2
+FAST_REQUEST_TIMEOUT = 15
+FAST_SEARCH_PAGE_DELAY_MIN = 3
+FAST_SEARCH_PAGE_DELAY_MAX = 7
+FAST_USER_AGENT = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+# When a scrape is interrupted (Ctrl+C), the next run continues from this query index
+# (1-based, same order as SEARCH_QUERIES). Separate files for fast HTTP vs browser mode.
+SCRAPER_RESUME_FAST_FILENAME = "scrape_resume_fast.json"
+SCRAPER_RESUME_BROWSER_FILENAME = "scrape_resume_browser.json"
 
 # ── LLM / 9router ─────────────────────────────────────────────────────────────
 
 # Base URL of the local 9router OpenAI-compatible proxy
 NINEROUTER_BASE_URL = "http://localhost:20128/v1"
 
-# Primary model for LLM skill extraction
-NINEROUTER_MODEL = "groq/llama-3.3-70b-versatile"
+# Primary model for LLM skill extraction. Use "9router-combo" when 9router should
+# pick an available backend; use e.g. "groq/llama-3.3-70b-versatile" only if that
+# provider is configured in 9router (otherwise every job 404s before fallback).
+NINEROUTER_MODEL = "9router-combo"
 
-# Fallback model when the primary hits its daily quota.
-# Set to a 9router combo name (e.g. "9router-combo") or another provider model.
-# Leave empty ("") to skip on exhaustion.
-# Recommended combo order: Cerebras/Llama-3.3-70B → Cerebras/GPT-OSS-120B →
-#   Groq/Llama-4-Maverick → Together/Llama-3.3-70B-Turbo →
-#   Fireworks/Llama-3.3-70B → Gemini-cli/Gemini-3-Flash → Kiro/Claude-Haiku-4.5
-NINEROUTER_FALLBACK_MODEL = "9router-combo"
+# Fallback when primary fails (429 exhaustion, 404, parse errors, etc.).
+# Example: "groq/llama-3.3-70b-versatile" if Groq is wired in 9router.
+NINEROUTER_FALLBACK_MODEL = ""
 
 # API key passed to the OpenAI-compatible client for 9router/local gateways.
 NINEROUTER_API_KEY = "local"
@@ -90,6 +118,10 @@ LLM_MAX_INPUT_CHARS = 8_000
 
 # Maximum tokens the LLM may produce in a single extraction response
 LLM_MAX_OUTPUT_TOKENS = 1_000
+
+# Request OpenAI-compatible ``response_format: {type: json_object}`` for skill extraction.
+# If the proxy returns an error about an unknown parameter, analyze.py retries once without it.
+LLM_RESPONSE_FORMAT_JSON_OBJECT = True
 
 # Maximum seconds to sleep-and-retry on a 429 rate-limit response.
 # Waits longer than this are not worth blocking on; fall back to the fallback model.
